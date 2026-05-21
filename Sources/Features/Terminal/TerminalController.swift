@@ -1034,9 +1034,20 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             focusedSurface = view
         }
 
-        // Initialize our content view to the SwiftUI root
+        // Initialize our content view to the SwiftUI root.
+        // emux: the SwiftUI hierarchy is now wrapped in a NavigationSplitView whose
+        // sidebar lists user-added projects. The detail pane is the inherited
+        // Ghostty `TerminalView`. In Phase 2 the sidebar is decorative — selecting
+        // a project doesn't yet scope anything.
+        let projectsModel = (NSApp.delegate as? AppDelegate)?.projectsModel ?? ProjectsModel()
         let container = TerminalViewContainer {
-            TerminalView(ghostty: ghostty, viewModel: self, delegate: self)
+            NavigationSplitView {
+                ProjectsSidebarView(model: projectsModel)
+                    .navigationSplitViewColumnWidth(min: 150, ideal: 200, max: 400)
+            } detail: {
+                TerminalView(ghostty: ghostty, viewModel: self, delegate: self)
+            }
+            .navigationSplitViewStyle(.balanced)
         }
 
         // Set the initial content size on the container so that
