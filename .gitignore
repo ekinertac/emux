@@ -1,0 +1,30 @@
+# Xcode user-specific data
+xcuserdata/
+*.xcuserstate
+*.xcuserdatad/
+
+# Build artifacts
+build/
+DerivedData/
+*.xcarchive
+
+# macOS metadata
+.DS_Store
+
+# Swift Package Manager local state
+.swiftpm/
+.build/
+Package.resolved
+
+# Temporary files
+*.swp
+*.tmp
+
+# IDE files
+.vscode/
+.idea/
+
+# libghostty xcframework binary — exceeds GitHub's 100 MB per-file limit.
+# Run `./scripts/build-libghostty.sh` after cloning to populate it.
+# The version pin is tracked in Frameworks/LIBGHOSTTY_VERSION.
+Frameworks/GhosttyKit.xcframework/
