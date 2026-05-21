@@ -117,6 +117,12 @@ struct ProjectsSidebarView: View {
             }
         }
         .listStyle(.sidebar)
+        .onChange(of: model.selectedProjectId) { _, newId in
+            guard let id = newId,
+                  let project = model.projects.first(where: { $0.id == id }),
+                  let appDelegate = NSApp.delegate as? AppDelegate else { return }
+            appDelegate.activateProject(project)
+        }
     }
 
     private var footer: some View {
@@ -148,6 +154,9 @@ struct ProjectsSidebarView: View {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         let added = model.addProject(at: url)
         model.selectedProjectId = added.id
+        if let appDelegate = NSApp.delegate as? AppDelegate {
+            appDelegate.activateProject(added)
+        }
     }
 
     /// Open the standard macOS Settings window via AppKit's responder chain.
