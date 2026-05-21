@@ -1522,6 +1522,93 @@ extension BaseTerminalController {
     }
 }
 
+// MARK: - Tabs
+// Tab lifecycle: creates/destroys SurfaceViews and keeps `tabs` + `surfaceTree`
+// in sync. Called from ProjectWindowContentView (Task 10) and AppDelegate
+// activateProject (Task 12). See also: Tab.swift, Project.swift.
+
+extension BaseTerminalController {
+
+    /// Add a tab to this controller. Creates a new SurfaceView spawned in
+    /// `meta.cwd`. Activates the new tab.
+    @discardableResult
+    func addTab(meta: Tab) -> TabState {
+        // Build a config that points the new shell at the project's cwd.
+        // SurfaceConfiguration.workingDirectory is String? (see SurfaceView.swift:648).
+        var config = Ghostty.SurfaceConfiguration()
+        config.workingDirectory = meta.cwd.path
+
+        guard let ghostty_app = ghostty.app else {
+            preconditionFailure("ghostty.app must be loaded by the time addTab is called")
+        }
+        let surface = Ghostty.SurfaceView(ghostty_app, baseConfig: config)
+        let tree = SplitTree<Ghostty.SurfaceView>(view: surface)
+        let state = TabState(id: meta.id, meta: meta, tree: tree)
+        tabs.append(state)
+        activateTab(state.id)
+        return state
+    }
+
+    /// Close a tab. If it was the last one, `surfaceTree` is reset to an
+    /// empty tree and `activeTabId` becomes nil — the caller (AppDelegate /
+    /// window controller) is responsible for deciding whether to close the
+    /// window. If it was the active tab, the next tab to the right (or the
+    /// new last tab) becomes active.
+    func closeTab(_ tabId: UUID) {
+        guard let idx = tabs.firstIndex(where: { $0.id == tabId }) else { return }
+        tabs.remove(at: idx)
+        guard !tabs.isEmpty else {
+            activeTabId = nil
+            surfaceTree = .init()
+            return
+        }
+        let nextIdx = min(idx, tabs.count - 1)
+        activateTab(tabs[nextIdx].id)
+    }
+
+    /// Make `tabId` the active tab. Saves the outgoing tab's `surfaceTree`
+    /// snapshot back into `tabs`, then loads the incoming tab's tree.
+    /// No-op if `tabId` is already active or not found.
+    func activateTab(_ tabId: UUID) {
+        guard tabId != activeTabId else { return }
+        guard let newIdx = tabs.firstIndex(where: { $0.id == tabId }) else { return }
+
+        // Persist the outgoing tab's current split tree.
+        if let oldId = activeTabId,
+           let oldIdx = tabs.firstIndex(where: { $0.id == oldId }) {
+            tabs[oldIdx].tree = surfaceTree
+        }
+
+        // Swap in the incoming tab's tree.
+        activeTabId = tabId
+        surfaceTree = tabs[newIdx].tree
+    }
+
+    /// Build live `TabState`s from a project's persisted `Tab[]`. Called once
+    /// when a TerminalController is first associated with a project. If the
+    /// project has no persisted tabs (e.g. fresh project), creates a single
+    /// default tab at the project root so the window is never empty.
+    func rebuildTabs(from project: Project) {
+        if project.tabs.isEmpty {
+            let initial = Tab(
+                title: project.path.lastPathComponent,
+                sortOrder: 0,
+                cwd: project.path
+            )
+            _ = addTab(meta: initial)
+            return
+        }
+        for tabMeta in project.tabs.sorted(by: { $0.sortOrder < $1.sortOrder }) {
+            _ = addTab(meta: tabMeta)
+        }
+        if let active = project.activeTabId, tabs.contains(where: { $0.id == active }) {
+            activateTab(active)
+        } else if let first = tabs.first {
+            activateTab(first.id)
+        }
+    }
+}
+
 // MARK: Notifications
 
 extension Notification.Name {
