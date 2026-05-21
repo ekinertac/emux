@@ -12,7 +12,9 @@ DEST      := platform=macOS
 BUNDLE_ID := com.ekinertac.emux.debug
 
 # Locate the most recently built emux.app under DerivedData. Evaluated lazily.
-BUILT_APP = $(shell find $$HOME/Library/Developer/Xcode/DerivedData -name 'emux.app' -type d 2>/dev/null | head -1)
+# Explicitly excludes Index.noindex (Xcode's code-completion build artifact,
+# which has no executable). Real builds live under Build/Products/<Config>/.
+BUILT_APP = $(shell /usr/bin/find $$HOME/Library/Developer/Xcode/DerivedData -name 'emux.app' -type d -not -path '*Index.noindex*' 2>/dev/null | head -1)
 
 # Color escape for the help target.
 CYAN  := \033[36m
