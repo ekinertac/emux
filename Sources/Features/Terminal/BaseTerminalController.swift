@@ -45,6 +45,23 @@ class BaseTerminalController: NSWindowController,
         didSet { surfaceTreeDidChange(from: oldValue, to: surfaceTree) }
     }
 
+    /// In-memory state for one tab. `tree` is the live SurfaceView tree for
+    /// this tab — it stays alive even when the tab is not the active one.
+    /// `meta` is the persisted Tab model (title, cwd, etc).
+    struct TabState: Identifiable {
+        let id: UUID
+        var meta: Tab
+        var tree: SplitTree<Ghostty.SurfaceView>
+    }
+
+    /// All tabs currently open in this controller's window. The active one
+    /// has its tree mirrored into `surfaceTree`.
+    @Published var tabs: [TabState] = []
+
+    /// The id of the tab currently active in this window. Setting this via
+    /// `activateTab(_:)` swaps `surfaceTree` to the new tab's tree.
+    @Published private(set) var activeTabId: UUID?
+
     /// This can be set to show/hide the command palette.
     @Published var commandPaletteIsShowing: Bool = false
 
