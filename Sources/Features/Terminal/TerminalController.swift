@@ -50,6 +50,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     /// For example, terminals executing custom scripts are not restorable.
     private var restorable: Bool = true
 
+    /// The project this window/controller belongs to. Set at construction
+    /// time by AppDelegate.activateProject.
+    var projectId: UUID?
+
     /// The configuration derived from the Ghostty config so we don't need to rely on references.
     private(set) var derivedConfig: DerivedConfig
 
@@ -1034,29 +1038,27 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             focusedSurface = view
         }
 
-        // Initialize our content view to the SwiftUI root.
-        // emux: the SwiftUI hierarchy is now wrapped in a NavigationSplitView whose
-        // sidebar lists user-added projects. The detail pane is the inherited
-        // Ghostty `TerminalView`. In Phase 2 the sidebar is decorative — selecting
-        // a project doesn't yet scope anything.
+        // Initialize our content view as an EmuxSplitController hosting the
+        // projects sidebar (left) and a per-project content view (right) that
+        // contains our custom tab strip + the inherited Ghostty TerminalView.
         let projectsModel = (NSApp.delegate as? AppDelegate)?.projectsModel ?? ProjectsModel()
-        let container = TerminalViewContainer {
-            NavigationSplitView {
-                ProjectsSidebarView(model: projectsModel)
-                    .navigationSplitViewColumnWidth(min: 150, ideal: 200, max: 400)
-            } detail: {
-                TerminalView(ghostty: ghostty, viewModel: self, delegate: self)
-            }
-            .navigationSplitViewStyle(.balanced)
-        }
 
-        // Set the initial content size on the container so that
-        // intrinsicContentSize returns the correct value immediately,
-        // without waiting for @FocusedValue to propagate through the
-        // SwiftUI focus chain.
-        container.initialContentSize = focusedSurface?.initialSize
+        // Right pane: tab strip on top + Ghostty terminal below.
+        let contentRoot = ProjectWindowContentView(
+            ghostty: ghostty,
+            controller: self,
+            delegate: self,
+            projectId: projectId ?? UUID(),  // AppDelegate sets a real id before showing
+            projectsModel: projectsModel
+        )
+        let contentHost = NSHostingView(rootView: contentRoot)
 
-        window.contentView = container
+        // Sidebar.
+        let sidebar = ProjectsSidebarView(model: projectsModel)
+
+        // Wire them together. Setting contentViewController also sets contentView.
+        let split = EmuxSplitController(sidebar: sidebar, content: contentHost)
+        window.contentViewController = split
 
         // If we have a default size, we want to apply it.
         if let defaultSize {
