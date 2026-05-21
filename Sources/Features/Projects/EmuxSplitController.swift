@@ -41,6 +41,12 @@ final class EmuxSplitController: NSSplitViewController {
         super.viewDidLoad()
         splitView.dividerStyle = .thin
 
+        // Tell NSWindow to size the window to this default when it adopts us
+        // as contentViewController. Without this, the window collapses to the
+        // tiny intrinsic size of NSSplitView (the bug fixed in Phase 3.x).
+        // Per-window frame persistence is deferred to a polish phase.
+        preferredContentSize = NSSize(width: 1100, height: 720)
+
         // Restore persisted sidebar width
         let stored = UserDefaults.standard.double(forKey: Self.sidebarWidthKey)
         let width = stored > 0 ? CGFloat(stored) : Self.defaultSidebarWidth
