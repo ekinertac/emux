@@ -192,8 +192,21 @@ class AppDelegate: NSObject,
             return
         }
 
-        // First activation this session — build a fresh TerminalController
-        // bound to this project's persisted tabs.
+        // Adopt an existing terminal window that doesn't yet belong to a
+        // project — typically the empty default window opened by Ghostty
+        // on launch when no projects existed. Avoids creating a second
+        // window the user has to dismiss.
+        if let adoptable = TerminalController.all.first(where: { $0.projectId == nil }) {
+            adoptable.projectId = project.id
+            projectWindows[project.id] = adoptable
+            adoptable.rebuildTabs(from: project)
+            adoptable.window?.makeKeyAndOrderFront(nil)
+            projectsModel.setActiveProject(project.id)
+            return
+        }
+
+        // First activation this session, no adoptable window — build a
+        // fresh TerminalController bound to this project's persisted tabs.
         let controller = TerminalController(ghostty)
         controller.projectId = project.id
         projectWindows[project.id] = controller
