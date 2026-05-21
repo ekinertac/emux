@@ -76,6 +76,88 @@ final class ProjectsModel: ObservableObject {
         scheduleSave()
     }
 
+    // MARK: - Tab mutations
+
+    /// Add a new tab to the given project. Returns the created Tab.
+    /// The tab's `cwd` defaults to the project's path; pass an explicit cwd
+    /// to spawn the shell elsewhere.
+    @discardableResult
+    func addTab(toProject projectId: UUID, cwd: URL? = nil) -> Tab? {
+        guard let idx = projects.firstIndex(where: { $0.id == projectId }) else { return nil }
+        let nextSort = (projects[idx].tabs.map(\.sortOrder).max() ?? -1) + 1
+        let tab = Tab(
+            title: (cwd ?? projects[idx].path).lastPathComponent,
+            sortOrder: nextSort,
+            cwd: cwd ?? projects[idx].path
+        )
+        projects[idx].tabs.append(tab)
+        projects[idx].activeTabId = tab.id
+        scheduleSave()
+        return tab
+    }
+
+    /// Close a tab. Returns the id of the tab that should become active after
+    /// the close (nil if the project now has no tabs).
+    @discardableResult
+    func closeTab(_ tabId: UUID, inProject projectId: UUID) -> UUID? {
+        guard let pIdx = projects.firstIndex(where: { $0.id == projectId }) else { return nil }
+        guard let tIdx = projects[pIdx].tabs.firstIndex(where: { $0.id == tabId }) else { return nil }
+
+        projects[pIdx].tabs.remove(at: tIdx)
+
+        // Choose the next-active tab: prefer the one that was to the right of
+        // the closed tab, fall back to the new last tab if we closed the last.
+        let nextActive: UUID?
+        if projects[pIdx].tabs.isEmpty {
+            nextActive = nil
+        } else if tIdx < projects[pIdx].tabs.count {
+            nextActive = projects[pIdx].tabs[tIdx].id
+        } else {
+            nextActive = projects[pIdx].tabs.last?.id
+        }
+        if projects[pIdx].activeTabId == tabId {
+            projects[pIdx].activeTabId = nextActive
+        }
+
+        // Renumber sortOrder
+        for (i, _) in projects[pIdx].tabs.enumerated() {
+            projects[pIdx].tabs[i].sortOrder = i
+        }
+
+        scheduleSave()
+        return nextActive
+    }
+
+    /// Set the active tab within a project. No-op if either id is missing.
+    func switchTab(to tabId: UUID, inProject projectId: UUID) {
+        guard let pIdx = projects.firstIndex(where: { $0.id == projectId }) else { return }
+        guard projects[pIdx].tabs.contains(where: { $0.id == tabId }) else { return }
+        projects[pIdx].activeTabId = tabId
+        scheduleSave()
+    }
+
+    /// Rename a tab's title.
+    func renameTab(_ tabId: UUID, to newTitle: String, inProject projectId: UUID) {
+        let trimmed = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let pIdx = projects.firstIndex(where: { $0.id == projectId }),
+              let tIdx = projects[pIdx].tabs.firstIndex(where: { $0.id == tabId }) else { return }
+        projects[pIdx].tabs[tIdx].title = trimmed
+        scheduleSave()
+    }
+
+    // MARK: - Active project
+
+    /// Switch the active project. This is purely a model update — the
+    /// AppDelegate observes selectedProjectId and routes window ordering.
+    func setActiveProject(_ projectId: UUID?) {
+        selectedProjectId = projectId
+        if let id = projectId, let idx = projects.firstIndex(where: { $0.id == id }) {
+            projects[idx].lastOpenedAt = Date()
+        }
+        scheduleSave()
+    }
+
     // MARK: - Persistence helpers
 
     /// Build a snapshot AppState for persistence. Called on every mutation.
