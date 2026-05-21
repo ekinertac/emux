@@ -180,12 +180,23 @@ class AppDelegate: NSObject,
     /// in the session. Other project windows are ordered out.
     @MainActor
     func activateProject(_ project: Project) {
+        // Capture the frame of the currently visible project window (if any)
+        // so the incoming window opens at the same location and size.
+        // Effect: switching projects feels like swapping content in one
+        // window rather than two windows jumping around the screen.
+        let inheritedFrame: NSRect? = projectWindows.values
+            .compactMap(\.window)
+            .first(where: { $0.isVisible })?.frame
+
         // Hide all other project windows first.
         for (id, controller) in projectWindows where id != project.id {
             controller.window?.orderOut(nil)
         }
 
         if let existing = projectWindows[project.id] {
+            if let frame = inheritedFrame {
+                existing.window?.setFrame(frame, display: false)
+            }
             existing.window?.makeKeyAndOrderFront(nil)
             existing.window?.orderFrontRegardless()
             projectsModel.setActiveProject(project.id)
@@ -199,6 +210,9 @@ class AppDelegate: NSObject,
         if let adoptable = TerminalController.all.first(where: { $0.projectId == nil }) {
             adoptable.projectId = project.id
             projectWindows[project.id] = adoptable
+            if let frame = inheritedFrame {
+                adoptable.window?.setFrame(frame, display: false)
+            }
             adoptable.rebuildTabs(from: project)
             adoptable.window?.makeKeyAndOrderFront(nil)
             projectsModel.setActiveProject(project.id)
@@ -212,6 +226,9 @@ class AppDelegate: NSObject,
         projectWindows[project.id] = controller
 
         // The window has loaded; now hydrate tabs from the project model.
+        if let frame = inheritedFrame {
+            controller.window?.setFrame(frame, display: false)
+        }
         if let window = controller.window {
             window.makeKeyAndOrderFront(nil)
         }
