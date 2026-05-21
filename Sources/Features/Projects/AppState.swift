@@ -19,7 +19,7 @@ struct AppState: Codable {
     /// global flag (not per-project); per-project collapse comes later.
     var sidebarCollapsed: Bool
 
-    static let currentSchemaVersion = 1
+    static let currentSchemaVersion = 2
 
     static let empty = AppState(
         schemaVersion: currentSchemaVersion,
