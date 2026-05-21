@@ -6,9 +6,9 @@ import AppKit
 struct ProjectsSidebarView: View {
     @ObservedObject var model: ProjectsModel
 
-    @State private var renameTarget: Project?
-    @State private var renameDraft: String = ""
-    @State private var showRename: Bool = false
+    /// The id of the project currently in inline-rename mode. nil means no row
+    /// is being edited.
+    @State private var editingProjectId: UUID?
 
     @State private var deleteTarget: Project?
     @State private var showDelete: Bool = false
@@ -31,21 +31,7 @@ struct ProjectsSidebarView: View {
             footer
         }
         .frame(minWidth: 150, idealWidth: 200, maxWidth: 400)
-        // Rename — modern .alert API supports an inline TextField inside `actions`.
-        .alert(
-            "Rename \(renameTarget?.name ?? "project")",
-            isPresented: $showRename,
-            presenting: renameTarget
-        ) { project in
-            TextField("Project name", text: $renameDraft)
-            Button("Rename") {
-                model.renameProject(id: project.id, to: renameDraft)
-            }
-            Button("Cancel", role: .cancel) { }
-        } message: { _ in
-            Text("Enter a new display name. The folder on disk is not affected.")
-        }
-        // Delete — destructive confirmation.
+        // Delete — destructive confirmation. (Rename is inline on the row itself.)
         .alert(
             "Delete \(deleteTarget?.name ?? "project")?",
             isPresented: $showDelete,
@@ -101,14 +87,20 @@ struct ProjectsSidebarView: View {
             ForEach(model.projects) { project in
                 ProjectRowView(
                     project: project,
-                    isSelected: model.selectedProjectId == project.id
+                    isSelected: model.selectedProjectId == project.id,
+                    isEditing: editingProjectId == project.id,
+                    onCommitRename: { newName in
+                        model.renameProject(id: project.id, to: newName)
+                        editingProjectId = nil
+                    },
+                    onCancelRename: {
+                        editingProjectId = nil
+                    }
                 )
                 .tag(project.id)
                 .contextMenu {
-                    Button("Rename…") {
-                        renameTarget = project
-                        renameDraft = project.name
-                        showRename = true
+                    Button("Rename") {
+                        editingProjectId = project.id
                     }
                     Button("Reveal in Finder") {
                         NSWorkspace.shared.activateFileViewerSelecting([project.path])
