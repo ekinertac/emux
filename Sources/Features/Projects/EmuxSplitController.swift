@@ -6,7 +6,7 @@ import SwiftUI
 /// non-collapsible). Persists the user-dragged sidebar width to UserDefaults.
 final class EmuxSplitController: NSSplitViewController {
     private static let sidebarWidthKey = "emux.sidebar.width"
-    private static let defaultSidebarWidth: CGFloat = 200
+    private static let defaultSidebarWidth: CGFloat = 250
 
     private let sidebarItem: NSSplitViewItem
     private let contentItem: NSSplitViewItem
