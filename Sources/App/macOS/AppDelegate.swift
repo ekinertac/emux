@@ -97,6 +97,10 @@ class AppDelegate: NSObject,
     /// The ghostty global state. Only one per process.
     let ghostty: Ghostty.App
 
+    /// The user's project list, persisted to ~/Library/Application Support/emux/state.json.
+    /// Phase 2: sidebar is decorative. Phase 3 wires scoping.
+    lazy var projectsModel = MainActor.assumeIsolated { ProjectsModel() }
+
     /// The global undo manager for app-level state such as window restoration.
     lazy var undoManager = ExpiringUndoManager()
 
