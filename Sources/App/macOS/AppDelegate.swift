@@ -101,6 +101,10 @@ class AppDelegate: NSObject,
     /// Phase 2: sidebar is decorative. Phase 3 wires scoping.
     lazy var projectsModel = MainActor.assumeIsolated { ProjectsModel() }
 
+    /// One TerminalController per project that has been opened this session.
+    /// We never destroy them — switching projects just orderOut/orderFronts.
+    private var projectWindows: [UUID: TerminalController] = [:]
+
     /// The global undo manager for app-level state such as window restoration.
     lazy var undoManager = ExpiringUndoManager()
 
@@ -167,6 +171,39 @@ class AppDelegate: NSObject,
         super.init()
 
         ghostty.delegate = self
+    }
+
+    // MARK: - Project Activation
+
+    /// Make the given project the active one. Brings its window forward,
+    /// creating it from persisted state if this is the first activation
+    /// in the session. Other project windows are ordered out.
+    @MainActor
+    func activateProject(_ project: Project) {
+        // Hide all other project windows first.
+        for (id, controller) in projectWindows where id != project.id {
+            controller.window?.orderOut(nil)
+        }
+
+        if let existing = projectWindows[project.id] {
+            existing.window?.makeKeyAndOrderFront(nil)
+            existing.window?.orderFrontRegardless()
+            projectsModel.setActiveProject(project.id)
+            return
+        }
+
+        // First activation this session — build a fresh TerminalController
+        // bound to this project's persisted tabs.
+        let controller = TerminalController(ghostty)
+        controller.projectId = project.id
+        projectWindows[project.id] = controller
+
+        // The window has loaded; now hydrate tabs from the project model.
+        if let window = controller.window {
+            window.makeKeyAndOrderFront(nil)
+        }
+        controller.rebuildTabs(from: project)
+        projectsModel.setActiveProject(project.id)
     }
 
     // MARK: - NSApplicationDelegate
@@ -331,6 +368,16 @@ class AppDelegate: NSObject,
                 NSApp.arrangeInFront(nil)
             }
         }
+
+        // emux: open a window for the last-active project, if any. If no
+        // projects exist, no window is opened — the user adds one via the
+        // sidebar's "+" button, which will then call activateProject.
+        if let lastId = projectsModel.selectedProjectId,
+           let last = projectsModel.projects.first(where: { $0.id == lastId }) {
+            activateProject(last)
+        } else if let first = projectsModel.projects.first {
+            activateProject(first)
+        }
     }
 
     func applicationDidHide(_ notification: Notification) {
@@ -350,7 +397,9 @@ class AppDelegate: NSObject,
             // is possible to have other windows in a few scenarios:
             //   - if we're opening a URL since `application(_:openFile:)` is called before this.
             //   - if we're restoring from persisted state
-            if TerminalController.all.isEmpty && derivedConfig.initialWindow {
+            // emux: also skip if projects exist — activateProject in applicationDidFinishLaunching
+            // already opened (or will open) a per-project window.
+            if TerminalController.all.isEmpty && derivedConfig.initialWindow && projectsModel.projects.isEmpty {
                 undoManager.disableUndoRegistration()
                 _ = TerminalController.newWindow(ghostty)
                 undoManager.enableUndoRegistration()
