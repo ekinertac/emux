@@ -180,6 +180,15 @@ class AppDelegate: NSObject,
     /// in the session. Other project windows are ordered out.
     @MainActor
     func activateProject(_ project: Project) {
+        // Prune stale entries — a project may have been deleted from the
+        // sidebar while its window was still registered. Closing those
+        // windows here keeps the registry in sync with the model.
+        let validIds = Set(projectsModel.projects.map(\.id))
+        for (id, controller) in projectWindows where !validIds.contains(id) {
+            controller.window?.close()
+            projectWindows.removeValue(forKey: id)
+        }
+
         // Capture the frame of the currently visible project window (if any)
         // so the incoming window opens at the same location and size.
         // Effect: switching projects feels like swapping content in one

@@ -1252,8 +1252,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     // MARK: First Responder
 
     @IBAction func newWindow(_ sender: Any?) {
-        guard let surface = focusedSurface?.surface else { return }
-        ghostty.newWindow(surface: surface)
+        // emux: defer to AppDelegate.newWindow which opens a sidebar-less
+        // "scratch" terminal window. Required because MainMenu.xib's
+        // newWindow: action targets the first responder, so TerminalController
+        // sees it before AppDelegate gets a chance.
+        (NSApp.delegate as? AppDelegate)?.newWindow(sender)
     }
 
     @IBAction func newTab(_ sender: Any?) {
