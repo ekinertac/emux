@@ -1099,37 +1099,59 @@ class AppDelegate: NSObject,
     }
 
     @IBAction func newTab(_ sender: Any?) {
-        // emux: route ⌘T to the active project's TerminalController's
-        // addTab API. The Tab model is created via ProjectsModel (which
-        // persists), and the live SurfaceView is created via controller.addTab.
-        guard let activeProjectId = projectsModel.selectedProjectId,
-              let project = projectsModel.projects.first(where: { $0.id == activeProjectId }),
-              let controller = projectWindows[activeProjectId] else { return }
+        // emux: route ⌘T to the KEY WINDOW's controller, not
+        // `projectsModel.selectedProjectId` (which may point at a different
+        // project if the user opened a fresh ⌘N window without activating
+        // any project in it). For project windows we route through
+        // ProjectsModel so tabs persist; for project-less windows (e.g., a
+        // fresh ⌘N window) we add a transient tab without touching state.
+        guard let controller = NSApp.keyWindow?.windowController as? TerminalController else { return }
 
-        if let meta = projectsModel.addTab(toProject: activeProjectId, cwd: project.path) {
-            controller.addTab(meta: meta)
+        if let projectId = controller.projectId,
+           let project = projectsModel.projects.first(where: { $0.id == projectId }) {
+            if let meta = projectsModel.addTab(toProject: projectId, cwd: project.path) {
+                controller.addTab(meta: meta)
+            }
+            return
         }
+
+        // No project — transient tab spawned at $HOME.
+        let cwd = URL(fileURLWithPath: NSHomeDirectory())
+        let meta = Tab(title: cwd.lastPathComponent, sortOrder: controller.tabs.count, cwd: cwd)
+        controller.addTab(meta: meta)
     }
 
     @IBAction func closeTab(_ sender: Any?) {
-        // emux: route ⌘W to close the active tab in the active project.
-        // If the active project has no more tabs after the close, close the
-        // window. (Closing a window does NOT delete its Project from the
-        // sidebar — the project just becomes inactive again.)
-        guard let activeProjectId = projectsModel.selectedProjectId,
-              let controller = projectWindows[activeProjectId],
-              let activeTabId = controller.activeTabId else { return }
+        // emux: close the active tab on the KEY WINDOW's controller (not the
+        // model's selected project). If the controller belongs to a project
+        // we also remove the persisted Tab; otherwise we just drop the
+        // transient tab. If no tabs remain, the window closes.
+        guard let controller = NSApp.keyWindow?.windowController as? TerminalController else {
+            // Fall back to default close for non-terminal windows (e.g. Settings).
+            NSApp.keyWindow?.close()
+            return
+        }
+
+        guard let activeTabId = controller.activeTabId else {
+            // No tab to close — close the window.
+            controller.window?.close()
+            if let projectId = controller.projectId {
+                projectWindows.removeValue(forKey: projectId)
+            }
+            return
+        }
 
         controller.closeTab(activeTabId)
-        let next = projectsModel.closeTab(activeTabId, inProject: activeProjectId)
-        if let next { controller.activateTab(next) }
 
-        // If no tabs left, close the window. The project itself remains
-        // listed in the sidebar — the user can reactivate it to spawn a
-        // fresh window with a default tab.
+        if let projectId = controller.projectId {
+            _ = projectsModel.closeTab(activeTabId, inProject: projectId)
+        }
+
         if controller.tabs.isEmpty {
             controller.window?.close()
-            projectWindows.removeValue(forKey: activeProjectId)
+            if let projectId = controller.projectId {
+                projectWindows.removeValue(forKey: projectId)
+            }
         }
     }
 
