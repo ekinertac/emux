@@ -318,13 +318,13 @@
                                     <action selector="resetFontSize:" target="-1" id="3dh-T9-IkH"/>
                                 </connections>
                             </menuItem>
-                            <menuItem title="Increase Font Size" id="CIH-ey-Z6x" userLabel="Increase Font Size">
+                            <menuItem title="Increase Font Size" keyEquivalent="=" id="CIH-ey-Z6x" userLabel="Increase Font Size">
                                 <modifierMask key="keyEquivalentModifierMask"/>
                                 <connections>
                                     <action selector="increaseFontSize:" target="-1" id="361-5E-7PY"/>
                                 </connections>
                             </menuItem>
-                            <menuItem title="Decrease Font Size" id="kzb-SZ-dOA">
+                            <menuItem title="Decrease Font Size" keyEquivalent="-" id="kzb-SZ-dOA">
                                 <modifierMask key="keyEquivalentModifierMask"/>
                                 <connections>
                                     <action selector="decreaseFontSize:" target="-1" id="Zlz-QZ-t8K"/>

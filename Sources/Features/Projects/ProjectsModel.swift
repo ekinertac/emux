@@ -18,6 +18,17 @@ final class ProjectsModel: ObservableObject {
         didSet { scheduleSave() }
     }
 
+    /// Index into emux's UI-scale presets (clamped to `[minUITypeSizeIndex,
+    /// maxUITypeSizeIndex]`). Drives the SwiftUI `dynamicTypeSize` applied
+    /// to the sidebar + tab strip (and any future chrome). Terminal font
+    /// size is independent and stays under `⌘+ / ⌘-`.
+    @Published var uiTypeSizeIndex: Int {
+        didSet { scheduleSave() }
+    }
+
+    static let minUITypeSizeIndex = 0  // .xSmall
+    static let maxUITypeSizeIndex = 6  // .xxxLarge
+
     private let persistence: StatePersistence
     private let log = Logger(subsystem: "com.ekinertac.emux", category: "projects")
 
@@ -27,7 +38,22 @@ final class ProjectsModel: ObservableObject {
         self.projects = state.projects.sorted { $0.sortOrder < $1.sortOrder }
         self.selectedProjectId = state.lastActiveProjectId
         self.sidebarCollapsed = state.sidebarCollapsed
-        log.info("ProjectsModel loaded with \(state.projects.count) projects")
+        self.uiTypeSizeIndex = state.uiTypeSizeIndex
+        log.info("ProjectsModel loaded with \(state.projects.count) projects, uiTypeSizeIndex=\(state.uiTypeSizeIndex)")
+    }
+
+    // MARK: - UI scale
+
+    func incrementUIScale() {
+        uiTypeSizeIndex = min(Self.maxUITypeSizeIndex, uiTypeSizeIndex + 1)
+    }
+
+    func decrementUIScale() {
+        uiTypeSizeIndex = max(Self.minUITypeSizeIndex, uiTypeSizeIndex - 1)
+    }
+
+    func resetUIScale() {
+        uiTypeSizeIndex = AppState.defaultUITypeSizeIndex
     }
 
     // MARK: - Mutations
@@ -166,7 +192,8 @@ final class ProjectsModel: ObservableObject {
             schemaVersion: AppState.currentSchemaVersion,
             projects: projects,
             lastActiveProjectId: selectedProjectId,
-            sidebarCollapsed: sidebarCollapsed
+            sidebarCollapsed: sidebarCollapsed,
+            uiTypeSizeIndex: uiTypeSizeIndex
         )
     }
 

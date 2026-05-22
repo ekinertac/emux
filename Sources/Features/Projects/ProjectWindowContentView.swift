@@ -46,6 +46,9 @@ where Controller: BaseTerminalController {
             // TabStripView expects [Tab] (the persisted model), not [TabState].
             // We project controller.tabs (which is [TabState]) down to [Tab]
             // via the `meta` property on each TabState.
+            //
+            // The .dynamicTypeSize is scoped to the tab strip ONLY — the
+            // terminal below uses its own font size system (⌘+/⌘-).
             TabStripView(
                 tabs: controller.tabs.map(\.meta),
                 activeTabId: controller.activeTabId,
@@ -66,6 +69,7 @@ where Controller: BaseTerminalController {
                     }
                 }
             )
+            .dynamicTypeSize(UIScale.dynamicTypeSize(forIndex: projectsModel.uiTypeSizeIndex))
 
             // TerminalView renders controller.surfaceTree (the active tab's
             // split tree). The controller itself is the viewModel because

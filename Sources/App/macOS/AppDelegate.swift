@@ -257,6 +257,26 @@ class AppDelegate: NSObject,
             return true
         }
 
+        // ⌘⇧+ / ⌘⇧- / ⌘⇧0 — scale the emux UI chrome (sidebar + tab strip).
+        // Terminal font size remains under ⌘+ / ⌘- (Ghostty's own bindings).
+        // Note charactersIgnoringModifiers returns the shifted character for
+        // the affected keys: ⌘⇧= → "+", ⌘⇧- → "_", ⌘⇧0 → ")".
+        if mods == [.command, .shift] {
+            switch chars {
+            case "+":
+                projectsModel.incrementUIScale()
+                return true
+            case "_":
+                projectsModel.decrementUIScale()
+                return true
+            case ")":
+                projectsModel.resetUIScale()
+                return true
+            default:
+                break
+            }
+        }
+
         // ⌘⇧[ / ⌘⇧] — cycle tabs backward / forward in the active project.
         if mods == [.command, .shift] {
             guard let projectId = projectsModel.selectedProjectId,

@@ -31,6 +31,9 @@ struct ProjectsSidebarView: View {
             footer
         }
         .frame(minWidth: 150, idealWidth: 200, maxWidth: 400)
+        // emux: scale sidebar chrome proportionally via the model's UI-scale.
+        // ⌘⇧+ / ⌘⇧- / ⌘⇧0 adjust the underlying index.
+        .dynamicTypeSize(UIScale.dynamicTypeSize(forIndex: model.uiTypeSizeIndex))
         // Delete — destructive confirmation. (Rename is inline on the row itself.)
         .alert(
             "Delete \(deleteTarget?.name ?? "project")?",
