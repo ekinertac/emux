@@ -193,7 +193,7 @@
                             <menuItem title="Close" id="DVo-aG-piG">
                                 <modifierMask key="keyEquivalentModifierMask"/>
                                 <connections>
-                                    <action selector="close:" target="-1" id="tTZ-2b-Mbm"/>
+                                    <action selector="closeTab:" target="-1" id="tTZ-2b-Mbm"/>
                                 </connections>
                             </menuItem>
                             <menuItem title="Close Tab" id="Obb-Mk-j8J">
