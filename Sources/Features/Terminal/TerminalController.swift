@@ -1060,6 +1060,14 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         let split = EmuxSplitController(sidebar: sidebar, content: contentHost)
         window.contentViewController = split
 
+        // Give the window a sensible initial size (and a floor that prevents
+        // shrinking below something usable). The window stays freely
+        // resizable — setting preferredContentSize on the view controller
+        // would lock it, which is why we size the window directly here.
+        // Per-window frame persistence is deferred to a polish phase.
+        window.setContentSize(NSSize(width: 1100, height: 720))
+        window.contentMinSize = NSSize(width: 600, height: 400)
+
         // If we have a default size, we want to apply it.
         if let defaultSize {
             defaultSize.apply(to: window)
