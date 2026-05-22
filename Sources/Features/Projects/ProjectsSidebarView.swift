@@ -6,6 +6,12 @@ import AppKit
 struct ProjectsSidebarView: View {
     @ObservedObject var model: ProjectsModel
 
+    /// When true, the sidebar shows the empty-state UI ("No projects yet")
+    /// regardless of how many projects exist in the global model. Used by
+    /// ⌘N scratch windows so they look fresh; the "+" button still adds
+    /// projects to the global model.
+    var forceEmptyState: Bool = false
+
     /// The id of the project currently in inline-rename mode. nil means no row
     /// is being edited.
     @State private var editingProjectId: UUID?
@@ -19,7 +25,7 @@ struct ProjectsSidebarView: View {
             Divider()
 
             Group {
-                if model.projects.isEmpty {
+                if forceEmptyState || model.projects.isEmpty {
                     emptyState
                 } else {
                     projectList

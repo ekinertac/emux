@@ -1095,10 +1095,12 @@ class AppDelegate: NSObject,
     }
 
     @IBAction func newWindow(_ sender: Any?) {
-        // emux: ⌘N opens a "scratch" terminal window — no projects sidebar,
-        // not bound to any project. Use Cmd-0 to add a new project instead.
+        // emux: ⌘N opens a "scratch" terminal window — sidebar visible but
+        // showing the empty state, not bound to any project. Adding a
+        // project from this sidebar adds it to the global model and
+        // activates a normal project window via `pickFolderAndAdd`.
         let controller = TerminalController(ghostty)
-        controller.hasProjectsSidebar = false
+        controller.isScratchWindow = true
         controller.window?.makeKeyAndOrderFront(nil)
 
         // Seed it with one fresh tab spawned at $HOME so the user sees a shell.
