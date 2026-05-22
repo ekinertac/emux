@@ -1003,10 +1003,38 @@ class AppDelegate: NSObject,
     }
 
     @IBAction func newTab(_ sender: Any?) {
-        _ = TerminalController.newTab(
-            ghostty,
-            from: TerminalController.preferredParent?.window
-        )
+        // emux: route ⌘T to the active project's TerminalController's
+        // addTab API. The Tab model is created via ProjectsModel (which
+        // persists), and the live SurfaceView is created via controller.addTab.
+        guard let activeProjectId = projectsModel.selectedProjectId,
+              let project = projectsModel.projects.first(where: { $0.id == activeProjectId }),
+              let controller = projectWindows[activeProjectId] else { return }
+
+        if let meta = projectsModel.addTab(toProject: activeProjectId, cwd: project.path) {
+            controller.addTab(meta: meta)
+        }
+    }
+
+    @IBAction func closeTab(_ sender: Any?) {
+        // emux: route ⌘W to close the active tab in the active project.
+        // If the active project has no more tabs after the close, close the
+        // window. (Closing a window does NOT delete its Project from the
+        // sidebar — the project just becomes inactive again.)
+        guard let activeProjectId = projectsModel.selectedProjectId,
+              let controller = projectWindows[activeProjectId],
+              let activeTabId = controller.activeTabId else { return }
+
+        controller.closeTab(activeTabId)
+        let next = projectsModel.closeTab(activeTabId, inProject: activeProjectId)
+        if let next { controller.activateTab(next) }
+
+        // If no tabs left, close the window. The project itself remains
+        // listed in the sidebar — the user can reactivate it to spawn a
+        // fresh window with a default tab.
+        if controller.tabs.isEmpty {
+            controller.window?.close()
+            projectWindows.removeValue(forKey: activeProjectId)
+        }
     }
 
     @IBAction func closeAllWindows(_ sender: Any?) {
