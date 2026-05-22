@@ -236,6 +236,82 @@ class AppDelegate: NSObject,
         projectsModel.setActiveProject(project.id)
     }
 
+    /// Intercept emux-specific keyboard shortcuts before Ghostty's
+    /// surface-level key handling. Called from `TerminalWindow.performKeyEquivalent`.
+    /// Returns `true` if the event was consumed, `false` to let the responder
+    /// chain (and thus the focused terminal) handle it.
+    @MainActor
+    func handleEmuxKeyEquivalent(_ event: NSEvent) -> Bool {
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard let chars = event.charactersIgnoringModifiers else { return false }
+
+        // ⌘1..⌘9 — switch to Nth tab in active project.
+        if mods == .command, chars.count == 1, let digit = Int(chars), (1...9).contains(digit) {
+            guard let projectId = projectsModel.selectedProjectId,
+                  let controller = projectWindows[projectId] else { return false }
+            let idx = digit - 1
+            guard idx < controller.tabs.count else { return false }
+            let tabId = controller.tabs[idx].id
+            controller.activateTab(tabId)
+            projectsModel.switchTab(to: tabId, inProject: projectId)
+            return true
+        }
+
+        // ⌘⇧[ / ⌘⇧] — cycle tabs backward / forward in the active project.
+        if mods == [.command, .shift] {
+            guard let projectId = projectsModel.selectedProjectId,
+                  let controller = projectWindows[projectId],
+                  let activeTabId = controller.activeTabId,
+                  let curIdx = controller.tabs.firstIndex(where: { $0.id == activeTabId }),
+                  !controller.tabs.isEmpty else { return false }
+            switch chars {
+            case "{":
+                let prev = (curIdx - 1 + controller.tabs.count) % controller.tabs.count
+                let id = controller.tabs[prev].id
+                controller.activateTab(id)
+                projectsModel.switchTab(to: id, inProject: projectId)
+                return true
+            case "}":
+                let next = (curIdx + 1) % controller.tabs.count
+                let id = controller.tabs[next].id
+                controller.activateTab(id)
+                projectsModel.switchTab(to: id, inProject: projectId)
+                return true
+            default:
+                break
+            }
+        }
+
+        // ⌃1..⌃9 — switch to Nth project in sidebar order.
+        if mods == .control, chars.count == 1, let digit = Int(chars), (1...9).contains(digit) {
+            let idx = digit - 1
+            guard idx < projectsModel.projects.count else { return false }
+            activateProject(projectsModel.projects[idx])
+            return true
+        }
+
+        // ⌘[ / ⌘] — cycle projects backward / forward.
+        if mods == .command {
+            guard !projectsModel.projects.isEmpty,
+                  let activeId = projectsModel.selectedProjectId,
+                  let curIdx = projectsModel.projects.firstIndex(where: { $0.id == activeId }) else { return false }
+            switch chars {
+            case "[":
+                let prev = (curIdx - 1 + projectsModel.projects.count) % projectsModel.projects.count
+                activateProject(projectsModel.projects[prev])
+                return true
+            case "]":
+                let next = (curIdx + 1) % projectsModel.projects.count
+                activateProject(projectsModel.projects[next])
+                return true
+            default:
+                break
+            }
+        }
+
+        return false
+    }
+
     // MARK: - NSApplicationDelegate
 
     func applicationWillFinishLaunching(_ notification: Notification) {

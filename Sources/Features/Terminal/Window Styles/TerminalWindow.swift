@@ -154,6 +154,18 @@ class TerminalWindow: NSWindow {
     override var canBecomeKey: Bool { return true }
     override var canBecomeMain: Bool { return true }
 
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        // emux: intercept our app-level shortcuts (⌘1..⌘9, ⌘⇧[ ⌘⇧],
+        // ⌃1..⌃9, ⌘[ ⌘]) BEFORE Ghostty's surface key handling. Returning
+        // true consumes the event; returning false lets the inherited
+        // path run (so terminal keystrokes still reach the shell).
+        if let appDelegate = NSApp.delegate as? AppDelegate,
+           appDelegate.handleEmuxKeyEquivalent(event) {
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
     override func sendEvent(_ event: NSEvent) {
         if tabTitleEditor.handleMouseDown(event) {
             return
