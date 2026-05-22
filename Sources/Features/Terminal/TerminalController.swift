@@ -54,6 +54,13 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     /// time by AppDelegate.activateProject.
     var projectId: UUID?
 
+    /// When true (default), the window's contentView is an `EmuxSplitController`
+    /// with the projects sidebar on the left. When false, the window is a
+    /// "scratch" terminal — no sidebar, just the tab strip + terminal. Used
+    /// by ⌘N to spawn a fresh terminal window unattached to any project.
+    /// Must be set BEFORE the window is accessed (e.g., immediately after init).
+    var hasProjectsSidebar: Bool = true
+
     /// The configuration derived from the Ghostty config so we don't need to rely on references.
     private(set) var derivedConfig: DerivedConfig
 
@@ -1053,12 +1060,18 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         )
         let contentHost = NSHostingView(rootView: contentRoot)
 
-        // Sidebar.
-        let sidebar = ProjectsSidebarView(model: projectsModel)
-
-        // Wire them together. Setting contentViewController also sets contentView.
-        let split = EmuxSplitController(sidebar: sidebar, content: contentHost)
-        window.contentViewController = split
+        // Two layout modes:
+        //   • With sidebar (default) — used by project windows. The sidebar
+        //     lists projects and lets the user switch between them.
+        //   • Without sidebar — used by ⌘N "scratch" windows that are not
+        //     bound to a project. Just the tab strip + terminal.
+        if hasProjectsSidebar {
+            let sidebar = ProjectsSidebarView(model: projectsModel)
+            let split = EmuxSplitController(sidebar: sidebar, content: contentHost)
+            window.contentViewController = split
+        } else {
+            window.contentView = contentHost
+        }
 
         // Give the window a sensible initial size (and a floor that prevents
         // shrinking below something usable). The window stays freely

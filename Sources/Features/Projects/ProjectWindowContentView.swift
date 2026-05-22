@@ -62,9 +62,18 @@ where Controller: BaseTerminalController {
                     if let next { controller.activateTab(next) }
                 },
                 onNew: {
-                    // Use the project's root path as the cwd for new tabs.
-                    let projectPath = projectsModel.projects.first(where: { $0.id == projectId })?.path
-                    if let meta = projectsModel.addTab(toProject: projectId, cwd: projectPath) {
+                    // If this controller is bound to a project, persist via
+                    // ProjectsModel. Otherwise (scratch window from ⌘N) add a
+                    // transient tab spawned at $HOME.
+                    if let project = projectsModel.projects.first(where: { $0.id == projectId }) {
+                        if let meta = projectsModel.addTab(toProject: projectId, cwd: project.path) {
+                            controller.addTab(meta: meta)
+                        }
+                    } else {
+                        let cwd = URL(fileURLWithPath: NSHomeDirectory())
+                        let meta = Tab(title: cwd.lastPathComponent,
+                                       sortOrder: controller.tabs.count,
+                                       cwd: cwd)
                         controller.addTab(meta: meta)
                     }
                 }

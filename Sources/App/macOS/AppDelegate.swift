@@ -1095,7 +1095,16 @@ class AppDelegate: NSObject,
     }
 
     @IBAction func newWindow(_ sender: Any?) {
-        _ = TerminalController.newWindow(ghostty)
+        // emux: ⌘N opens a "scratch" terminal window — no projects sidebar,
+        // not bound to any project. Use Cmd-0 to add a new project instead.
+        let controller = TerminalController(ghostty)
+        controller.hasProjectsSidebar = false
+        controller.window?.makeKeyAndOrderFront(nil)
+
+        // Seed it with one fresh tab spawned at $HOME so the user sees a shell.
+        let cwd = URL(fileURLWithPath: NSHomeDirectory())
+        let meta = Tab(title: cwd.lastPathComponent, sortOrder: 0, cwd: cwd)
+        controller.addTab(meta: meta)
     }
 
     @IBAction func newTab(_ sender: Any?) {
