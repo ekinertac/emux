@@ -1247,28 +1247,20 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     }
 
     @IBAction func newTab(_ sender: Any?) {
-        guard let surface = focusedSurface?.surface else { return }
-        ghostty.newTab(surface: surface)
+        // emux: defer to AppDelegate.newTab, which adds a tab to the
+        // active project's TerminalController via our custom tab API.
+        // MainMenu.xib wires ⌘T to first-responder; TerminalController
+        // sits earlier in the responder chain than AppDelegate, so this
+        // forwarding is required to bypass the inherited Ghostty path.
+        (NSApp.delegate as? AppDelegate)?.newTab(sender)
     }
 
     @IBAction func closeTab(_ sender: Any?) {
-        guard let window = window else { return }
-        guard window.tabGroup?.windows.count ?? 0 > 1 else {
-            closeWindow(sender)
-            return
-        }
-
-        guard surfaceTree.contains(where: { $0.needsConfirmQuit }) else {
-            closeTabImmediately()
-            return
-        }
-
-        confirmClose(
-            messageText: "Close Tab?",
-            informativeText: "The terminal still has a running process. If you close the tab the process will be killed."
-        ) {
-            self.closeTabImmediately()
-        }
+        // emux: defer to AppDelegate.closeTab (same responder-chain
+        // forwarding rationale as newTab above). If the active project's
+        // window has no custom tabs left, AppDelegate closes the window
+        // and clears its registry entry.
+        (NSApp.delegate as? AppDelegate)?.closeTab(sender)
     }
 
     @IBAction func closeOtherTabs(_ sender: Any?) {
