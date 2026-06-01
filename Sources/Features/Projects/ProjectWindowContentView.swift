@@ -80,10 +80,36 @@ where Controller: BaseTerminalController {
             )
             .dynamicTypeSize(UIScale.dynamicTypeSize(forIndex: projectsModel.uiTypeSizeIndex))
 
-            // TerminalView renders controller.surfaceTree (the active tab's
-            // split tree). The controller itself is the viewModel because
-            // BaseTerminalController conforms to TerminalViewModel.
-            TerminalView(ghostty: ghostty, viewModel: controller, delegate: delegate)
+            // When the controller has no tabs, the terminal area shows an
+            // empty-state placeholder. Project windows stay open in this
+            // state — ⌘T spawns a fresh tab in the project's cwd.
+            // Scratch windows close on last-tab-close (handled in AppDelegate).
+            if controller.tabs.isEmpty {
+                emptyTerminalState
+            } else {
+                // TerminalView renders controller.surfaceTree (the active tab's
+                // split tree). The controller itself is the viewModel because
+                // BaseTerminalController conforms to TerminalViewModel.
+                TerminalView(ghostty: ghostty, viewModel: controller, delegate: delegate)
+            }
         }
+    }
+
+    private var emptyTerminalState: some View {
+        VStack(spacing: 12) {
+            Spacer()
+            Image(systemName: "terminal")
+                .font(.system(size: 36))
+                .foregroundStyle(.secondary)
+            Text("No active terminal")
+                .font(.headline)
+                .foregroundStyle(.secondary)
+            Text("Press ⌘T to open a new terminal")
+                .font(.subheadline)
+                .foregroundStyle(.tertiary)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.black)
     }
 }

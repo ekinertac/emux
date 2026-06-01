@@ -1143,20 +1143,21 @@ class AppDelegate: NSObject,
 
     @IBAction func closeTab(_ sender: Any?) {
         // emux: close the active tab on the KEY WINDOW's controller (not the
-        // model's selected project). If the controller belongs to a project
-        // we also remove the persisted Tab; otherwise we just drop the
-        // transient tab. If no tabs remain, the window closes.
+        // model's selected project). Behavior on last-tab-close:
+        //   • Project windows stay open and show an empty-state placeholder.
+        //     ⌘T then spawns a fresh terminal in the project's cwd.
+        //   • Scratch windows (⌘N) close — they have no project to anchor to.
         guard let controller = NSApp.keyWindow?.windowController as? TerminalController else {
-            // Fall back to default close for non-terminal windows (e.g. Settings).
+            // Non-terminal window (e.g. Settings) — fall back to default close.
             NSApp.keyWindow?.close()
             return
         }
 
         guard let activeTabId = controller.activeTabId else {
-            // No tab to close — close the window.
-            controller.window?.close()
-            if let projectId = controller.projectId {
-                projectWindows.removeValue(forKey: projectId)
+            // No tab to close. For scratch windows, that means the window is
+            // already empty and should close on ⌘W. Project windows just stay.
+            if controller.isScratchWindow {
+                controller.window?.close()
             }
             return
         }
@@ -1167,11 +1168,11 @@ class AppDelegate: NSObject,
             _ = projectsModel.closeTab(activeTabId, inProject: projectId)
         }
 
-        if controller.tabs.isEmpty {
+        // Scratch windows are throwaway — close when their last tab is gone.
+        // Project windows stay open with an empty terminal area; the user can
+        // press ⌘T to add a fresh tab in the project's cwd.
+        if controller.tabs.isEmpty && controller.isScratchWindow {
             controller.window?.close()
-            if let projectId = controller.projectId {
-                projectWindows.removeValue(forKey: projectId)
-            }
         }
     }
 
