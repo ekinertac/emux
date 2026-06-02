@@ -165,8 +165,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             window.surfaceIsZoomed = to.zoomed != nil
         }
 
-        // If our surface tree is now nil then we close our window.
-        if to.isEmpty {
+        // If our surface tree is now empty:
+        //   • Scratch windows close — they have nothing to anchor to.
+        //   • Project windows stay open and show an empty-state placeholder
+        //     in ProjectWindowContentView; ⌘T spawns a fresh terminal.
+        if to.isEmpty && isScratchWindow {
             self.window?.close()
         }
     }
