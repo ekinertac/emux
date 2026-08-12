@@ -97,13 +97,17 @@ class AppDelegate: NSObject,
     /// The ghostty global state. Only one per process.
     let ghostty: Ghostty.App
 
-    /// The user's project list, persisted to ~/Library/Application Support/emux/state.json.
-    /// Phase 2: sidebar is decorative. Phase 3 wires scoping.
-    lazy var projectsModel = MainActor.assumeIsolated { ProjectsModel() }
+    // Post-Phase-3 model: emux behaves like every other terminal app —
+    // multiple windows, each with its OWN project list. There is no
+    // global ProjectsModel. Each `TerminalController` owns its own
+    // `ProjectsModel` keyed by a stable `windowId`; StatePersistence
+    // holds all windows' snapshots in-memory and writes state.json.
+    // To find every window in-process, filter `TerminalController.all`.
 
-    /// One TerminalController per project that has been opened this session.
-    /// We never destroy them — switching projects just orderOut/orderFronts.
-    private var projectWindows: [UUID: TerminalController] = [:]
+    /// True while the app is winding down. Windows closing during
+    /// termination should PRESERVE their persisted snapshots so
+    /// relaunch restores them. Set from `applicationShouldTerminate`.
+    private(set) var isTerminating: Bool = false
 
     /// The global undo manager for app-level state such as window restoration.
     lazy var undoManager = ExpiringUndoManager()
@@ -173,76 +177,45 @@ class AppDelegate: NSObject,
         ghostty.delegate = self
     }
 
-    // MARK: - Project Activation
+    // MARK: - Project Windows
 
-    /// Make the given project the active one. Brings its window forward,
-    /// creating it from persisted state if this is the first activation
-    /// in the session. Other project windows are ordered out.
+    /// Switch `controller`'s current project to `project`, rebuilding
+    /// its tab list from the project's persisted state. Never touches
+    /// any other window. Multi-window model: each window owns its own
+    /// ProjectsModel, so `project` here is always from
+    /// `controller.projectsModel.projects`.
     @MainActor
-    func activateProject(_ project: Project) {
-        // Prune stale entries — a project may have been deleted from the
-        // sidebar while its window was still registered. Closing those
-        // windows here keeps the registry in sync with the model.
-        let validIds = Set(projectsModel.projects.map(\.id))
-        for (id, controller) in projectWindows where !validIds.contains(id) {
-            controller.window?.close()
-            projectWindows.removeValue(forKey: id)
-        }
-
-        // Capture the frame of the currently visible project window (if any)
-        // so the incoming window opens at the same location and size.
-        // Effect: switching projects feels like swapping content in one
-        // window rather than two windows jumping around the screen.
-        let inheritedFrame: NSRect? = projectWindows.values
-            .compactMap(\.window)
-            .first(where: { $0.isVisible })?.frame
-
-        // Hide all other project windows first.
-        for (id, controller) in projectWindows where id != project.id {
-            controller.window?.orderOut(nil)
-        }
-
-        if let existing = projectWindows[project.id] {
-            if let frame = inheritedFrame {
-                existing.window?.setFrame(frame, display: false)
-            }
-            existing.window?.makeKeyAndOrderFront(nil)
-            existing.window?.orderFrontRegardless()
-            projectsModel.setActiveProject(project.id)
+    func openProject(_ project: Project, in controller: TerminalController) {
+        // Already showing this project — just focus.
+        if controller.projectId == project.id {
+            controller.window?.makeKeyAndOrderFront(nil)
             return
         }
 
-        // Adopt an existing terminal window that doesn't yet belong to a
-        // project — typically the empty default window opened by Ghostty
-        // on launch when no projects existed. Avoids creating a second
-        // window the user has to dismiss.
-        if let adoptable = TerminalController.all.first(where: { $0.projectId == nil }) {
-            adoptable.projectId = project.id
-            projectWindows[project.id] = adoptable
-            if let frame = inheritedFrame {
-                adoptable.window?.setFrame(frame, display: false)
-            }
-            adoptable.rebuildTabs(from: project)
-            adoptable.window?.makeKeyAndOrderFront(nil)
-            projectsModel.setActiveProject(project.id)
-            return
-        }
-
-        // First activation this session, no adoptable window — build a
-        // fresh TerminalController bound to this project's persisted tabs.
-        let controller = TerminalController(ghostty)
         controller.projectId = project.id
-        projectWindows[project.id] = controller
+        controller.replaceTabs(from: project)
+        // Record the switch in this window's persisted snapshot so
+        // relaunch opens on this project (not the previous one).
+        controller.projectsModel.setActiveProject(project.id)
+        controller.window?.makeKeyAndOrderFront(nil)
+    }
 
-        // The window has loaded; now hydrate tabs from the project model.
-        if let frame = inheritedFrame {
-            controller.window?.setFrame(frame, display: false)
-        }
-        if let window = controller.window {
-            window.makeKeyAndOrderFront(nil)
-        }
-        controller.rebuildTabs(from: project)
-        projectsModel.setActiveProject(project.id)
+    /// Persist the given window's frame into its ProjectsModel
+    /// snapshot. Called from TerminalController on
+    /// windowDidResize/windowDidMove. Frame is per-WINDOW now (not
+    /// per-project), so it applies no matter which project the window
+    /// is currently showing.
+    @MainActor
+    func persistWindowFrame(_ frame: NSRect, forController controller: TerminalController) {
+        controller.projectsModel.updateWindowFrame(WindowFrame(frame))
+    }
+
+    /// The controller that owns the current key window, if any. Nearly
+    /// every keyboard shortcut targets this — "act on the window I'm
+    /// looking at."
+    @MainActor
+    private var keyController: TerminalController? {
+        NSApp.keyWindow?.windowController as? TerminalController
     }
 
     /// Intercept emux-specific keyboard shortcuts before Ghostty's
@@ -254,42 +227,44 @@ class AppDelegate: NSObject,
         let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         guard let chars = event.charactersIgnoringModifiers else { return false }
 
-        // ⌘1..⌘9 — switch to Nth tab in active project.
+        // ⌘1..⌘9 — switch to Nth tab in KEY window.
         if mods == .command, chars.count == 1, let digit = Int(chars), (1...9).contains(digit) {
-            guard let projectId = projectsModel.selectedProjectId,
-                  let controller = projectWindows[projectId] else { return false }
+            guard let controller = keyController,
+                  let projectId = controller.projectId else { return false }
             let idx = digit - 1
             guard idx < controller.tabs.count else { return false }
             let tabId = controller.tabs[idx].id
             controller.activateTab(tabId)
-            projectsModel.switchTab(to: tabId, inProject: projectId)
+            controller.projectsModel.switchTab(to: tabId, inProject: projectId)
             return true
         }
 
-        // ⌘⇧+ / ⌘⇧- / ⌘⇧0 — scale the emux UI chrome (sidebar + tab strip).
-        // Terminal font size remains under ⌘+ / ⌘- (Ghostty's own bindings).
-        // Note charactersIgnoringModifiers returns the shifted character for
-        // the affected keys: ⌘⇧= → "+", ⌘⇧- → "_", ⌘⇧0 → ")".
+        // ⌘⇧+ / ⌘⇧- / ⌘⇧0 — scale the KEY window's UI chrome (sidebar
+        // + tab strip). Terminal font size remains under ⌘+ / ⌘-
+        // (Ghostty's own bindings). Note charactersIgnoringModifiers
+        // returns the shifted character for the affected keys: ⌘⇧= → "+",
+        // ⌘⇧- → "_", ⌘⇧0 → ")".
         if mods == [.command, .shift] {
+            guard let controller = keyController else { return false }
             switch chars {
             case "+":
-                projectsModel.incrementUIScale()
+                controller.projectsModel.incrementUIScale()
                 return true
             case "_":
-                projectsModel.decrementUIScale()
+                controller.projectsModel.decrementUIScale()
                 return true
             case ")":
-                projectsModel.resetUIScale()
+                controller.projectsModel.resetUIScale()
                 return true
             default:
                 break
             }
         }
 
-        // ⌘⇧[ / ⌘⇧] — cycle tabs backward / forward in the active project.
+        // ⌘⇧[ / ⌘⇧] — cycle tabs backward / forward in the KEY window.
         if mods == [.command, .shift] {
-            guard let projectId = projectsModel.selectedProjectId,
-                  let controller = projectWindows[projectId],
+            guard let controller = keyController,
+                  let projectId = controller.projectId,
                   let activeTabId = controller.activeTabId,
                   let curIdx = controller.tabs.firstIndex(where: { $0.id == activeTabId }),
                   !controller.tabs.isEmpty else { return false }
@@ -298,40 +273,45 @@ class AppDelegate: NSObject,
                 let prev = (curIdx - 1 + controller.tabs.count) % controller.tabs.count
                 let id = controller.tabs[prev].id
                 controller.activateTab(id)
-                projectsModel.switchTab(to: id, inProject: projectId)
+                controller.projectsModel.switchTab(to: id, inProject: projectId)
                 return true
             case "}":
                 let next = (curIdx + 1) % controller.tabs.count
                 let id = controller.tabs[next].id
                 controller.activateTab(id)
-                projectsModel.switchTab(to: id, inProject: projectId)
+                controller.projectsModel.switchTab(to: id, inProject: projectId)
                 return true
             default:
                 break
             }
         }
 
-        // ⌃1..⌃9 — switch to Nth project in sidebar order.
+        // ⌃1..⌃9 — switch KEY window to Nth project in ITS OWN sidebar.
         if mods == .control, chars.count == 1, let digit = Int(chars), (1...9).contains(digit) {
+            guard let controller = keyController else { return false }
+            let projects = controller.projectsModel.projects
             let idx = digit - 1
-            guard idx < projectsModel.projects.count else { return false }
-            activateProject(projectsModel.projects[idx])
+            guard idx < projects.count else { return false }
+            openProject(projects[idx], in: controller)
             return true
         }
 
-        // ⌘[ / ⌘] — cycle projects backward / forward.
+        // ⌘[ / ⌘] — cycle KEY window's project (within its own model).
         if mods == .command {
-            guard !projectsModel.projects.isEmpty,
-                  let activeId = projectsModel.selectedProjectId,
-                  let curIdx = projectsModel.projects.firstIndex(where: { $0.id == activeId }) else { return false }
+            guard let controller = keyController else { return false }
+            let projects = controller.projectsModel.projects
+            guard !projects.isEmpty else { return false }
+            let curIdx = controller.projectId
+                .flatMap { id in projects.firstIndex(where: { $0.id == id }) }
+                ?? 0
             switch chars {
             case "[":
-                let prev = (curIdx - 1 + projectsModel.projects.count) % projectsModel.projects.count
-                activateProject(projectsModel.projects[prev])
+                let prev = (curIdx - 1 + projects.count) % projects.count
+                openProject(projects[prev], in: controller)
                 return true
             case "]":
-                let next = (curIdx + 1) % projectsModel.projects.count
-                activateProject(projectsModel.projects[next])
+                let next = (curIdx + 1) % projects.count
+                openProject(projects[next], in: controller)
                 return true
             default:
                 break
@@ -504,15 +484,39 @@ class AppDelegate: NSObject,
             }
         }
 
-        // emux: open a window for the last-active project, if any. If no
-        // projects exist, no window is opened — the user adds one via the
-        // sidebar's "+" button, which will then call activateProject.
-        if let lastId = projectsModel.selectedProjectId,
-           let last = projectsModel.projects.first(where: { $0.id == lastId }) {
-            activateProject(last)
-        } else if let first = projectsModel.projects.first {
-            activateProject(first)
+        // emux: restore every window that was open at last quit. Each
+        // one owns its own persisted ProjectsModel keyed by a windowId
+        // in state.json. If nothing is persisted (fresh install or
+        // user closed all windows before quit), open one empty window
+        // so the app isn't invisible.
+        let snapshots = StatePersistence.shared.load()
+        if snapshots.isEmpty {
+            let controller = TerminalController(
+                ghostty,
+                projectsModel: ProjectsModel(persistence: .shared, snapshot: nil)
+            )
+            controller.window?.makeKeyAndOrderFront(nil)
+        } else {
+            for snapshot in snapshots {
+                restoreWindow(from: snapshot)
+            }
         }
+    }
+
+    /// Recreate a window from a persisted snapshot on launch.
+    @MainActor
+    private func restoreWindow(from snapshot: WindowSnapshot) {
+        let model = ProjectsModel(persistence: .shared, snapshot: snapshot)
+        let controller = TerminalController(ghostty, projectsModel: model)
+        if let activeId = snapshot.activeProjectId,
+           let project = snapshot.projects.first(where: { $0.id == activeId }) {
+            controller.projectId = project.id
+            controller.rebuildTabs(from: project)
+        }
+        if let frame = snapshot.windowFrame?.cgRect {
+            controller.window?.setFrame(frame, display: false)
+        }
+        controller.window?.makeKeyAndOrderFront(nil)
     }
 
     func applicationDidHide(_ notification: Notification) {
@@ -528,17 +532,10 @@ class AppDelegate: NSObject,
         if !applicationHasBecomeActive {
             applicationHasBecomeActive = true
 
-            // Let's launch our first window. We only do this if we have no other windows. It
-            // is possible to have other windows in a few scenarios:
-            //   - if we're opening a URL since `application(_:openFile:)` is called before this.
-            //   - if we're restoring from persisted state
-            // emux: also skip if projects exist — activateProject in applicationDidFinishLaunching
-            // already opened (or will open) a per-project window.
-            if TerminalController.all.isEmpty && derivedConfig.initialWindow && projectsModel.projects.isEmpty {
-                undoManager.disableUndoRegistration()
-                _ = TerminalController.newWindow(ghostty)
-                undoManager.enableUndoRegistration()
-            }
+            // emux: applicationDidFinishLaunching already opened a
+            // window. No fallback needed — even the zero-projects case
+            // now opens an empty sidebar-visible window.
+            _ = derivedConfig.initialWindow  // silence unused-config lint if any
         }
     }
 
@@ -547,6 +544,11 @@ class AppDelegate: NSObject,
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // Flag termination so windowWillClose knows to PRESERVE its
+        // persisted snapshot instead of deleting it — we want relaunch
+        // to bring these windows back.
+        self.isTerminating = true
+
         let windows = NSApplication.shared.windows
         if windows.isEmpty { return .terminateNow }
 
@@ -1104,75 +1106,42 @@ class AppDelegate: NSObject,
     }
 
     @IBAction func newWindow(_ sender: Any?) {
-        // emux: ⌘N opens a "scratch" terminal window — sidebar visible but
-        // showing the empty state, not bound to any project. Adding a
-        // project from this sidebar adds it to the global model and
-        // activates a normal project window via `pickFolderAndAdd`.
-        let controller = TerminalController(ghostty)
-        controller.isScratchWindow = true
+        // emux: ⌘N opens a new project window with an EMPTY sidebar —
+        // its own independent PERSISTED ProjectsModel with a fresh
+        // windowId. Adds to this window's sidebar don't show up in any
+        // other window, and this window is restored on next launch (as
+        // long as it's still open at quit time).
+        let controller = TerminalController(
+            ghostty,
+            projectsModel: ProjectsModel(persistence: .shared, snapshot: nil)
+        )
         controller.window?.makeKeyAndOrderFront(nil)
-
-        // Seed it with one fresh tab spawned at $HOME so the user sees a shell.
-        let cwd = URL(fileURLWithPath: NSHomeDirectory())
-        let meta = Tab(title: cwd.lastPathComponent, sortOrder: 0, cwd: cwd)
-        controller.addTab(meta: meta)
     }
 
     @IBAction func newTab(_ sender: Any?) {
-        // emux: route ⌘T to the KEY WINDOW's controller, not
-        // `projectsModel.selectedProjectId` (which may point at a different
-        // project if the user opened a fresh ⌘N window without activating
-        // any project in it). For project windows we route through
-        // ProjectsModel so tabs persist; for project-less windows (e.g., a
-        // fresh ⌘N window) we add a transient tab without touching state.
-        guard let controller = NSApp.keyWindow?.windowController as? TerminalController else { return }
-
-        if let projectId = controller.projectId,
-           let project = projectsModel.projects.first(where: { $0.id == projectId }) {
-            if let meta = projectsModel.addTab(toProject: projectId, cwd: project.path) {
-                controller.addTab(meta: meta)
-            }
-            return
+        // emux: ⌘T adds a persisted tab in the KEY window's current
+        // project (in that window's own model). No-op if no project.
+        guard let controller = keyController,
+              let projectId = controller.projectId,
+              let project = controller.projectsModel.projects.first(where: { $0.id == projectId })
+        else { return }
+        if let meta = controller.projectsModel.addTab(toProject: projectId, cwd: project.path) {
+            controller.addTab(meta: meta)
         }
-
-        // No project — transient tab spawned at $HOME.
-        let cwd = URL(fileURLWithPath: NSHomeDirectory())
-        let meta = Tab(title: cwd.lastPathComponent, sortOrder: controller.tabs.count, cwd: cwd)
-        controller.addTab(meta: meta)
     }
 
     @IBAction func closeTab(_ sender: Any?) {
-        // emux: close the active tab on the KEY WINDOW's controller (not the
-        // model's selected project). Behavior on last-tab-close:
-        //   • Project windows stay open and show an empty-state placeholder.
-        //     ⌘T then spawns a fresh terminal in the project's cwd.
-        //   • Scratch windows (⌘N) close — they have no project to anchor to.
-        guard let controller = NSApp.keyWindow?.windowController as? TerminalController else {
-            // Non-terminal window (e.g. Settings) — fall back to default close.
+        // emux: ⌘W closes the active tab in the KEY window. Window
+        // stays open (placeholder in content pane); user closes via red
+        // dot to actually kill the window.
+        guard let controller = keyController else {
             NSApp.keyWindow?.close()
             return
         }
-
-        guard let activeTabId = controller.activeTabId else {
-            // No tab to close. For scratch windows, that means the window is
-            // already empty and should close on ⌘W. Project windows just stay.
-            if controller.isScratchWindow {
-                controller.window?.close()
-            }
-            return
-        }
-
+        guard let activeTabId = controller.activeTabId else { return }
         controller.closeTab(activeTabId)
-
         if let projectId = controller.projectId {
-            _ = projectsModel.closeTab(activeTabId, inProject: projectId)
-        }
-
-        // Scratch windows are throwaway — close when their last tab is gone.
-        // Project windows stay open with an empty terminal area; the user can
-        // press ⌘T to add a fresh tab in the project's cwd.
-        if controller.tabs.isEmpty && controller.isScratchWindow {
-            controller.window?.close()
+            _ = controller.projectsModel.closeTab(activeTabId, inProject: projectId)
         }
     }
 

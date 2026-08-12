@@ -2,15 +2,28 @@ import SwiftUI
 import AppKit
 
 /// The left-column sidebar listing every project the user has added.
-/// In Phase 2 selection is purely visual — Phase 3 wires the scoping.
+///
+/// Each window owns an independent instance of this view. Selection state
+/// (which row is highlighted) is per-window and reflects the owning
+/// `TerminalController`'s `projectId`, not any global "active project".
+/// Clicking a row calls `onSelectProject` — the consumer decides how to
+/// interpret that (typically: switch this window's project).
+///
+/// The "+" button (and its ⌘0 equivalent) adds a project to the global
+/// model and immediately switches THIS window to it. Adding never affects
+/// any other window.
 struct ProjectsSidebarView: View {
     @ObservedObject var model: ProjectsModel
 
-    /// When true, the sidebar shows the empty-state UI ("No projects yet")
-    /// regardless of how many projects exist in the global model. Used by
-    /// ⌘N scratch windows so they look fresh; the "+" button still adds
-    /// projects to the global model.
-    var forceEmptyState: Bool = false
+    /// The controller that owns this sidebar. Observed so selection
+    /// highlighting tracks the window's current project. Weak-like via
+    /// SwiftUI's observation lifecycle — the sidebar dies with the
+    /// window's contentViewController.
+    @ObservedObject var controller: TerminalController
+
+    /// Called when the user picks a project row. Consumer switches the
+    /// window's `projectId` and rebuilds tabs.
+    var onSelectProject: (Project) -> Void
 
     /// The id of the project currently in inline-rename mode. nil means no row
     /// is being edited.
@@ -25,7 +38,7 @@ struct ProjectsSidebarView: View {
             Divider()
 
             Group {
-                if forceEmptyState || model.projects.isEmpty {
+                if model.projects.isEmpty {
                     emptyState
                 } else {
                     projectList
@@ -47,6 +60,14 @@ struct ProjectsSidebarView: View {
             presenting: deleteTarget
         ) { project in
             Button("Delete", role: .destructive) {
+                // Per-window model: this projectId only exists in this
+                // window. If this window is currently showing the
+                // project being deleted, clear the binding so the
+                // content pane falls back to "Select a project" instead
+                // of silently pointing at a removed row.
+                if controller.projectId == project.id {
+                    controller.projectId = nil
+                }
                 model.deleteProject(id: project.id)
             }
             Button("Cancel", role: .cancel) { }
@@ -92,11 +113,25 @@ struct ProjectsSidebarView: View {
     }
 
     private var projectList: some View {
-        List(selection: $model.selectedProjectId) {
+        // Selection is a computed binding backed by the controller's
+        // projectId: reading returns THIS window's current project,
+        // writing dispatches through onSelectProject (which switches
+        // just this window). SwiftUI's List selection semantics require
+        // Binding<Set<UUID>> for tag-based selection.
+        let selection = Binding<UUID?>(
+            get: { controller.projectId },
+            set: { newId in
+                guard let newId,
+                      let project = model.projects.first(where: { $0.id == newId })
+                else { return }
+                onSelectProject(project)
+            }
+        )
+        return List(selection: selection) {
             ForEach(model.projects) { project in
                 ProjectRowView(
                     project: project,
-                    isSelected: model.selectedProjectId == project.id,
+                    isSelected: controller.projectId == project.id,
                     isEditing: editingProjectId == project.id,
                     onCommitRename: { newName in
                         model.renameProject(id: project.id, to: newName)
@@ -126,12 +161,6 @@ struct ProjectsSidebarView: View {
             }
         }
         .listStyle(.sidebar)
-        .onChange(of: model.selectedProjectId) { _, newId in
-            guard let id = newId,
-                  let project = model.projects.first(where: { $0.id == id }),
-                  let appDelegate = NSApp.delegate as? AppDelegate else { return }
-            appDelegate.activateProject(project)
-        }
     }
 
     private var footer: some View {
@@ -162,10 +191,9 @@ struct ProjectsSidebarView: View {
 
         guard panel.runModal() == .OK, let url = panel.url else { return }
         let added = model.addProject(at: url)
-        model.selectedProjectId = added.id
-        if let appDelegate = NSApp.delegate as? AppDelegate {
-            appDelegate.activateProject(added)
-        }
+        // Adding via this sidebar's "+" always switches THIS window to
+        // the new project. Other windows are unaffected.
+        onSelectProject(added)
     }
 
     /// Open the standard macOS Settings window via AppKit's responder chain.

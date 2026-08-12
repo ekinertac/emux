@@ -27,72 +27,85 @@ import SwiftUI
 /// Generic constraint: `Controller` must be a `BaseTerminalController`
 /// (which already conforms to `TerminalViewModel`) so that it can be passed
 /// directly to `TerminalView<ViewModel: TerminalViewModel>`.
-struct ProjectWindowContentView<Controller>: View
-where Controller: BaseTerminalController {
+struct ProjectWindowContentView: View {
     @ObservedObject var ghostty: Ghostty.App
-    @ObservedObject var controller: Controller
+    // Observed so body re-runs when the window switches project or its
+    // tab list changes. TerminalController (not just Base) so we can
+    // read `projectId` — which lives on the macOS-specific subclass.
+    @ObservedObject var controller: TerminalController
 
     // Optional — BaseTerminalController itself conforms to TerminalViewDelegate,
     // so callers can pass the controller directly or nil out if unused.
     weak var delegate: (any TerminalViewDelegate)?
 
-    /// The project this window is bound to. Required to call ProjectsModel
-    /// mutators with the correct projectId.
-    let projectId: UUID
     @ObservedObject var projectsModel: ProjectsModel
 
     var body: some View {
         VStack(spacing: 0) {
-            // TabStripView expects [Tab] (the persisted model), not [TabState].
-            // We project controller.tabs (which is [TabState]) down to [Tab]
-            // via the `meta` property on each TabState.
-            //
-            // The .dynamicTypeSize is scoped to the tab strip ONLY — the
-            // terminal below uses its own font size system (⌘+/⌘-).
-            TabStripView(
-                tabs: controller.tabs.map(\.meta),
-                activeTabId: controller.activeTabId,
-                onSelect: { id in
-                    controller.activateTab(id)
-                    projectsModel.switchTab(to: id, inProject: projectId)
-                },
-                onClose: { id in
-                    controller.closeTab(id)
-                    let next = projectsModel.closeTab(id, inProject: projectId)
-                    if let next { controller.activateTab(next) }
-                },
-                onNew: {
-                    // If this controller is bound to a project, persist via
-                    // ProjectsModel. Otherwise (scratch window from ⌘N) add a
-                    // transient tab spawned at $HOME.
-                    if let project = projectsModel.projects.first(where: { $0.id == projectId }) {
-                        if let meta = projectsModel.addTab(toProject: projectId, cwd: project.path) {
-                            controller.addTab(meta: meta)
-                        }
-                    } else {
-                        let cwd = URL(fileURLWithPath: NSHomeDirectory())
-                        let meta = Tab(title: cwd.lastPathComponent,
-                                       sortOrder: controller.tabs.count,
-                                       cwd: cwd)
-                        controller.addTab(meta: meta)
-                    }
-                }
-            )
-            .dynamicTypeSize(UIScale.dynamicTypeSize(forIndex: projectsModel.uiTypeSizeIndex))
-
-            // When the controller has no tabs, the terminal area shows an
-            // empty-state placeholder. Project windows stay open in this
-            // state — ⌘T spawns a fresh tab in the project's cwd.
-            // Scratch windows close on last-tab-close (handled in AppDelegate).
-            if controller.tabs.isEmpty {
+            // Layout cases (all per-window state):
+            //   • No project selected → "Select a project" placeholder.
+            //   • Project + no tabs   → tab strip + "No active terminal".
+            //   • Project + tabs      → tab strip + terminal.
+            if controller.projectId == nil {
+                selectAProjectState
+            } else if controller.tabs.isEmpty {
+                tabStrip
                 emptyTerminalState
             } else {
-                // TerminalView renders controller.surfaceTree (the active tab's
-                // split tree). The controller itself is the viewModel because
-                // BaseTerminalController conforms to TerminalViewModel.
+                tabStrip
                 TerminalView(ghostty: ghostty, viewModel: controller, delegate: delegate)
             }
         }
+    }
+
+    private var tabStrip: some View {
+        // The .dynamicTypeSize is scoped to the tab strip ONLY — the
+        // terminal below uses its own font size system (⌘+/⌘-).
+        TabStripView(
+            tabs: controller.tabs.map(\.meta),
+            activeTabId: controller.activeTabId,
+            onSelect: { id in
+                controller.activateTab(id)
+                if let pid = controller.projectId {
+                    projectsModel.switchTab(to: id, inProject: pid)
+                }
+            },
+            onClose: { id in
+                controller.closeTab(id)
+                if let pid = controller.projectId {
+                    let next = projectsModel.closeTab(id, inProject: pid)
+                    if let next { controller.activateTab(next) }
+                }
+            },
+            onNew: {
+                guard let pid = controller.projectId,
+                      let project = projectsModel.projects.first(where: { $0.id == pid })
+                else { return }
+                if let meta = projectsModel.addTab(toProject: pid, cwd: project.path) {
+                    controller.addTab(meta: meta)
+                }
+            }
+        )
+        .dynamicTypeSize(UIScale.dynamicTypeSize(forIndex: projectsModel.uiTypeSizeIndex))
+    }
+
+    private var selectAProjectState: some View {
+        VStack(spacing: 12) {
+            Spacer()
+            Image(systemName: "sidebar.left")
+                .font(.system(size: 36))
+                .foregroundStyle(.secondary)
+            Text("Select a project")
+                .font(.headline)
+                .foregroundStyle(.secondary)
+            Text("Pick a project from the sidebar, or press ⌘0 to add one.")
+                .font(.subheadline)
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.black)
     }
 
     private var emptyTerminalState: some View {

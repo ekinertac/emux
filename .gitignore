@@ -28,3 +28,9 @@ Package.resolved
 # Run `./scripts/build-libghostty.sh` after cloning to populate it.
 # The version pin is tracked in Frameworks/LIBGHOSTTY_VERSION.
 Frameworks/GhosttyKit.xcframework/
+
+# mkdown artifacts (auto-managed)
+STATUS.html
+
+# Code coverage output from xcodebuild — regenerated on every build.
+default.profraw

@@ -1524,8 +1524,8 @@ extension BaseTerminalController {
 
 // MARK: - Tabs
 // Tab lifecycle: creates/destroys SurfaceViews and keeps `tabs` + `surfaceTree`
-// in sync. Called from ProjectWindowContentView (Task 10) and AppDelegate
-// activateProject (Task 12). See also: Tab.swift, Project.swift.
+// in sync. Called from ProjectWindowContentView and AppDelegate.openProject.
+// See also: Tab.swift, Project.swift.
 
 extension BaseTerminalController {
 
@@ -1606,6 +1606,18 @@ extension BaseTerminalController {
         } else if let first = tabs.first {
             activateTab(first.id)
         }
+    }
+
+    /// Same as `rebuildTabs(from:)` but wipes the existing tab list
+    /// first. Used when a window switches from one project to another
+    /// in place — old tabs should go, new ones come in. Each old
+    /// TabState's SurfaceView is torn down implicitly when its
+    /// reference is dropped.
+    func replaceTabs(from project: Project) {
+        tabs.removeAll()
+        activeTabId = nil
+        surfaceTree = .init()
+        rebuildTabs(from: project)
     }
 }
 

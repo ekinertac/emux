@@ -81,75 +81,14 @@ class TerminalWindowRestoration: NSObject, NSWindowRestoration {
         state: NSCoder,
         completionHandler: @escaping (NSWindow?, Error?) -> Void
     ) {
-        // Verify the identifier is what we expect
-        guard identifier == .init(String(describing: Self.self)) else {
-            completionHandler(nil, TerminalRestoreError.identifierUnknown)
-            return
-        }
-
-        // The app delegate is definitely setup by now. If it isn't our AppDelegate
-        // then something is royally fucked up but protect against it anyhow.
-        guard let appDelegate = NSApplication.shared.delegate as? AppDelegate else {
-            completionHandler(nil, TerminalRestoreError.delegateInvalid)
-            return
-        }
-
-        // If our configuration is "never" then we never restore the state
-        // no matter what. Note its safe to use "ghostty.config" directly here
-        // because window restoration is only ever invoked on app start so we
-        // don't have to deal with config reloads.
-        if appDelegate.ghostty.config.windowSaveState == "never" {
-            completionHandler(nil, nil)
-            return
-        }
-
-        // Decode the state. If we can't decode the state, then we can't restore.
-        guard let state = TerminalRestorableState(coder: state) else {
-            completionHandler(nil, TerminalRestoreError.stateDecodeFailed)
-            return
-        }
-
-        // The window creation has to go through our terminalManager so that it
-        // can be found for events from libghostty. This uses the low-level
-        // createWindow so that AppKit can place the window wherever it should
-        // be.
-        let c = TerminalController.init(
-            appDelegate.ghostty,
-            withSurfaceTree: state.surfaceTree)
-        guard let window = c.window else {
-            completionHandler(nil, TerminalRestoreError.windowDidNotLoad)
-            return
-        }
-
-        // Restore our tab color
-        (window as? TerminalWindow)?.tabColor = state.tabColor
-
-        // Restore the tab title override
-        c.titleOverride = state.titleOverride
-
-        // Setup our restored state on the controller
-        // Find the focused surface in surfaceTree
-        if let focusedStr = state.focusedSurface {
-            var foundView: Ghostty.SurfaceView?
-            for view in c.surfaceTree where view.id.uuidString == focusedStr {
-                foundView = view
-                break
-            }
-
-            if let view = foundView {
-                c.focusedSurface = view
-                restoreFocus(to: view, inWindow: window)
-            }
-        }
-
-        completionHandler(window, nil)
-        guard let mode = state.effectiveFullscreenMode, mode != .native else {
-            // We let AppKit handle native fullscreen
-            return
-        }
-        // Give the window to AppKit first, then adjust its frame and style
-        // to minimise any visible frame changes.
-        c.toggleFullscreen(mode: mode)
+        // emux: emux/state.json owns the "which projects, which frames"
+        // restoration. Ghostty's own restoration path can't reconstruct
+        // an emux window's project binding, and Ghostty scrollback
+        // isn't persisted across relaunch, so restoration adds no user
+        // value here. Skip it entirely.
+        _ = identifier
+        _ = state
+        completionHandler(nil, nil)
     }
 
     /// This restores the focus state of the surfaceview within the given window. When restoring,

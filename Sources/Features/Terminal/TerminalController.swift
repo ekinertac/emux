@@ -50,16 +50,19 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     /// For example, terminals executing custom scripts are not restorable.
     private var restorable: Bool = true
 
-    /// The project this window/controller belongs to. Set at construction
-    /// time by AppDelegate.activateProject.
-    var projectId: UUID?
+    /// The project this window is currently showing. nil = empty
+    /// window (sidebar visible, content pane shows "Select a project").
+    /// Published so the sidebar re-renders selection state when this
+    /// window switches project.
+    @Published var projectId: UUID?
 
-    /// When true, this window's sidebar shows the "No projects yet" empty
-    /// state regardless of what's in the global `ProjectsModel`. Adding a
-    /// project from a scratch window still goes to the global model and
-    /// activates a normal project window. Default false (project windows).
-    /// Set BEFORE the window is accessed (e.g., immediately after init).
-    var isScratchWindow: Bool = false
+    /// Per-window projects model. Each window has its own project list,
+    /// sidebar collapse state, UI scale, and last-active project. Two
+    /// windows are fully independent: adding a project in window A does
+    /// NOT show up in window B's sidebar. First window on launch is
+    /// seeded from the persisted state.json; ⌘N windows start with an
+    /// empty model.
+    let projectsModel: ProjectsModel
 
     /// The configuration derived from the Ghostty config so we don't need to rely on references.
     private(set) var derivedConfig: DerivedConfig
@@ -70,7 +73,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     init(_ ghostty: Ghostty.App,
          withBaseConfig base: Ghostty.SurfaceConfiguration? = nil,
          withSurfaceTree tree: SplitTree<Ghostty.SurfaceView>? = nil,
-         parent: NSWindow? = nil
+         parent: NSWindow? = nil,
+         projectsModel: ProjectsModel
     ) {
         // The window we manage is not restorable if we've specified a command
         // to execute. We do this because the restored window is meaningless at the
@@ -81,6 +85,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         // Setup our initial derived config based on the current app config
         self.derivedConfig = DerivedConfig(ghostty.config)
+
+        // Must be set BEFORE super.init because super assigns surfaceTree,
+        // which triggers surfaceTreeDidChange → self.window access → nib
+        // load → windowDidLoad, which reads this to build the sidebar.
+        self.projectsModel = projectsModel
 
         super.init(ghostty, baseConfig: base, surfaceTree: tree)
 
@@ -165,13 +174,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             window.surfaceIsZoomed = to.zoomed != nil
         }
 
-        // If our surface tree is now empty:
-        //   • Scratch windows close — they have nothing to anchor to.
-        //   • Project windows stay open and show an empty-state placeholder
-        //     in ProjectWindowContentView; ⌘T spawns a fresh terminal.
-        if to.isEmpty && isScratchWindow {
-            self.window?.close()
-        }
+        // Windows never auto-close on empty surface tree — the content
+        // pane shows a placeholder (either "Select a project" if no
+        // project bound, or "No active terminal" if a project is bound
+        // but has no tabs). ⌘T spawns a fresh tab; user closes the
+        // window explicitly via the red dot to actually kill it.
     }
 
     override func replaceSurfaceTree(
@@ -239,7 +246,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         withBaseConfig baseConfig: Ghostty.SurfaceConfiguration? = nil,
         withParent explicitParent: NSWindow? = nil
     ) -> TerminalController {
-        let c = TerminalController.init(ghostty, withBaseConfig: baseConfig)
+        let c = TerminalController.init(ghostty, withBaseConfig: baseConfig, projectsModel: .ephemeral())
 
         // Get our parent. Our parent is the one explicitly given to us,
         // otherwise the focused terminal, otherwise an arbitrary one.
@@ -328,7 +335,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         position: NSPoint? = nil,
         confirmUndo: Bool = true,
     ) -> TerminalController {
-        let c = TerminalController.init(ghostty, withSurfaceTree: tree)
+        let c = TerminalController.init(ghostty, withSurfaceTree: tree, projectsModel: .ephemeral())
 
         // Calculate the target frame based on the tree's view bounds
         let treeSize: CGSize? = tree.root?.viewBounds()
@@ -407,7 +414,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
 
         // Create a new window and add it to the parent
-        let controller = TerminalController.init(ghostty, withBaseConfig: baseConfig)
+        let controller = TerminalController.init(ghostty, withBaseConfig: baseConfig, projectsModel: .ephemeral())
         guard let window = controller.window else { return controller }
 
         // If the parent is miniaturized, then macOS exhibits really strange behaviors
@@ -961,7 +968,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     }
 
     convenience init(_ ghostty: Ghostty.App, with undoState: UndoState) {
-        self.init(ghostty, withSurfaceTree: undoState.surfaceTree)
+        self.init(ghostty, withSurfaceTree: undoState.surfaceTree, projectsModel: .ephemeral())
 
         // Show the window and restore its frame
         showWindow(nil)
@@ -1048,27 +1055,25 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             focusedSurface = view
         }
 
-        // Initialize our content view as an EmuxSplitController hosting the
-        // projects sidebar (left) and a per-project content view (right) that
-        // contains our custom tab strip + the inherited Ghostty TerminalView.
-        let projectsModel = (NSApp.delegate as? AppDelegate)?.projectsModel ?? ProjectsModel()
-
-        // Right pane: tab strip on top + Ghostty terminal below.
+        // Every window has the sidebar + tab-strip + terminal layout.
+        // The sidebar reads this window's OWN projectsModel — no shared
+        // state across windows.
         let contentRoot = ProjectWindowContentView(
             ghostty: ghostty,
             controller: self,
             delegate: self,
-            projectId: projectId ?? UUID(),  // AppDelegate sets a real id before showing
-            projectsModel: projectsModel
+            projectsModel: self.projectsModel
         )
         let contentHost = NSHostingView(rootView: contentRoot)
 
-        // Every window has the sidebar. Scratch windows (⌘N) pass
-        // `forceEmptyState: true` so their sidebar shows the empty state
-        // even if the global ProjectsModel has projects in it.
         let sidebar = ProjectsSidebarView(
-            model: projectsModel,
-            forceEmptyState: isScratchWindow
+            model: self.projectsModel,
+            controller: self,
+            onSelectProject: { [weak self] project in
+                guard let self,
+                      let appDelegate = NSApp.delegate as? AppDelegate else { return }
+                appDelegate.openProject(project, in: self)
+            }
         )
         let split = EmuxSplitController(sidebar: sidebar, content: contentHost)
         window.contentViewController = split
@@ -1178,6 +1183,16 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         super.windowWillClose(notification)
         self.relabelTabs()
 
+        // emux: user-closed windows drop their persisted snapshot so
+        // relaunch doesn't resurrect them. During app termination we
+        // want the OPPOSITE — keep all snapshots so relaunch restores
+        // exactly what was open. AppDelegate.isTerminating tells us
+        // which mode we're in.
+        if let appDelegate = NSApp.delegate as? AppDelegate,
+           !appDelegate.isTerminating {
+            self.projectsModel.deletePersistedSnapshot()
+        }
+
         // If we remove a window, we reset the cascade point to the key window so that
         // the next window cascade's from that one.
         if let focusedWindow = NSApplication.shared.keyWindow {
@@ -1226,6 +1241,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         // Whenever we move save our last position for the next start.
         LastWindowPosition.shared.save(window)
+
+        persistFrameToProject()
     }
 
     override func windowDidResize(_ notification: Notification) {
@@ -1233,6 +1250,16 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         // Whenever we resize save our last position and size for the next start.
         LastWindowPosition.shared.save(window)
+
+        persistFrameToProject()
+    }
+
+    /// Forward the current window frame to AppDelegate → ProjectsModel so
+    /// it survives relaunch. Runs on every move/resize; ProjectsModel
+    /// dedupes and debounces the disk write.
+    private func persistFrameToProject() {
+        guard let window, let appDelegate = NSApp.delegate as? AppDelegate else { return }
+        appDelegate.persistWindowFrame(window.frame, forController: self)
     }
 
     func windowDidBecomeMain(_ notification: Notification) {

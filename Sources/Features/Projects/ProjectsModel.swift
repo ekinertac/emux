@@ -2,26 +2,33 @@ import Foundation
 import Combine
 import OSLog
 
-/// The runtime owner of the user's project list. Loaded once at app launch,
-/// mutated via `add`/`rename`/`delete`/`reorder`. Every mutation triggers a
-/// debounced disk save via `StatePersistence`.
+/// The runtime owner of ONE window's project list. Multi-window model:
+/// each TerminalController owns its own ProjectsModel; there is no
+/// global model. Each model has a stable `windowId` that keys its
+/// snapshot inside the shared state.json (via StatePersistence).
+///
+/// Every mutation calls `scheduleSave()` which rebuilds this window's
+/// `WindowSnapshot` and pushes it to StatePersistence. The persistence
+/// layer holds all windows' snapshots in-memory and debounces writes.
+///
+/// Ephemeral mode (persistence=nil) is used by internal undo/restore
+/// paths that need a working model without touching disk.
 @MainActor
 final class ProjectsModel: ObservableObject {
     @Published private(set) var projects: [Project]
 
-    /// In-memory only in Phase 2. Promoted to persisted state in Phase 3 when
-    /// project switching actually scopes the window.
+    /// The project this window has last activated. Persisted so the
+    /// window opens on that project after quit+relaunch.
     @Published var selectedProjectId: UUID?
 
-    /// Global sidebar collapse — persists across launches.
     @Published var sidebarCollapsed: Bool {
         didSet { scheduleSave() }
     }
 
-    /// Index into emux's UI-scale presets (clamped to `[minUITypeSizeIndex,
-    /// maxUITypeSizeIndex]`). Drives the SwiftUI `dynamicTypeSize` applied
-    /// to the sidebar + tab strip (and any future chrome). Terminal font
-    /// size is independent and stays under `⌘+ / ⌘-`.
+    /// Index into emux's UI-scale presets (clamped to
+    /// `[minUITypeSizeIndex, maxUITypeSizeIndex]`). Drives the SwiftUI
+    /// `dynamicTypeSize` applied to the sidebar + tab strip. Terminal
+    /// font size is independent and stays under `⌘+ / ⌘-`.
     @Published var uiTypeSizeIndex: Int {
         didSet { scheduleSave() }
     }
@@ -29,17 +36,64 @@ final class ProjectsModel: ObservableObject {
     static let minUITypeSizeIndex = 0  // .xSmall
     static let maxUITypeSizeIndex = 6  // .xxxLarge
 
-    private let persistence: StatePersistence
+    /// This model's window id — key into StatePersistence's snapshot map.
+    let windowId: UUID
+
+    /// Last-known frame for this window. Held here so it can be
+    /// snapshotted; TerminalController writes into it on
+    /// windowDidResize/windowDidMove.
+    private var windowFrame: WindowFrame?
+
+    /// nil = ephemeral (no disk writes). Set = persisted model, saves
+    /// via this StatePersistence instance.
+    private let persistence: StatePersistence?
     private let log = Logger(subsystem: "com.ekinertac.emux", category: "projects")
 
-    init(persistence: StatePersistence = .shared) {
+    /// Persisted model. If `snapshot` is nil, this is a brand-new
+    /// window that hasn't been saved yet — starts empty. If given,
+    /// hydrates from that snapshot (restore-on-launch flow).
+    init(persistence: StatePersistence = .shared, snapshot: WindowSnapshot? = nil) {
         self.persistence = persistence
-        let state = persistence.load()
-        self.projects = state.projects.sorted { $0.sortOrder < $1.sortOrder }
-        self.selectedProjectId = state.lastActiveProjectId
-        self.sidebarCollapsed = state.sidebarCollapsed
-        self.uiTypeSizeIndex = state.uiTypeSizeIndex
-        log.info("ProjectsModel loaded with \(state.projects.count) projects, uiTypeSizeIndex=\(state.uiTypeSizeIndex)")
+        if let s = snapshot {
+            self.windowId = s.id
+            self.projects = s.projects.sorted { $0.sortOrder < $1.sortOrder }
+            self.selectedProjectId = s.activeProjectId
+            self.sidebarCollapsed = s.sidebarCollapsed
+            self.uiTypeSizeIndex = s.uiTypeSizeIndex
+            self.windowFrame = s.windowFrame
+            log.info("ProjectsModel restored window \(s.id.uuidString.prefix(8)) with \(s.projects.count) projects")
+        } else {
+            self.windowId = UUID()
+            self.projects = []
+            self.selectedProjectId = nil
+            self.sidebarCollapsed = false
+            self.uiTypeSizeIndex = AppState.defaultUITypeSizeIndex
+            self.windowFrame = nil
+            log.info("ProjectsModel new window \(self.windowId.uuidString.prefix(8))")
+        }
+    }
+
+    /// Ephemeral (in-memory only) model — no disk load, no disk save.
+    /// Used by undo/restore paths in TerminalController that need a
+    /// working ProjectsModel but shouldn't leak into persisted state.
+    static func ephemeral() -> ProjectsModel {
+        return ProjectsModel(ephemeralWindowId: UUID())
+    }
+
+    private init(ephemeralWindowId id: UUID) {
+        self.persistence = nil
+        self.windowId = id
+        self.projects = []
+        self.selectedProjectId = nil
+        self.sidebarCollapsed = false
+        self.uiTypeSizeIndex = AppState.defaultUITypeSizeIndex
+        self.windowFrame = nil
+    }
+
+    /// Called when the owning window closes and the model's snapshot
+    /// should be removed from persisted state. No-op for ephemeral.
+    func deletePersistedSnapshot() {
+        persistence?.removeWindow(id: windowId)
     }
 
     // MARK: - UI scale
@@ -154,6 +208,15 @@ final class ProjectsModel: ObservableObject {
         return nextActive
     }
 
+    /// Persist this WINDOW's frame. Called by AppDelegate on
+    /// windowDidResize/windowDidMove. Dedupes to avoid write storms
+    /// during live drag.
+    func updateWindowFrame(_ frame: WindowFrame) {
+        guard windowFrame != frame else { return }
+        windowFrame = frame
+        scheduleSave()
+    }
+
     /// Set the active tab within a project. No-op if either id is missing.
     func switchTab(to tabId: UUID, inProject projectId: UUID) {
         guard let pIdx = projects.firstIndex(where: { $0.id == projectId }) else { return }
@@ -174,8 +237,10 @@ final class ProjectsModel: ObservableObject {
 
     // MARK: - Active project
 
-    /// Switch the active project. This is purely a model update — the
-    /// AppDelegate observes selectedProjectId and routes window ordering.
+    /// Update the record of which project this window is showing. The
+    /// window's controller.projectId is the real source of truth for
+    /// runtime; this call keeps the persisted snapshot in sync so
+    /// restart opens the right project.
     func setActiveProject(_ projectId: UUID?) {
         selectedProjectId = projectId
         if let id = projectId, let idx = projects.firstIndex(where: { $0.id == id }) {
@@ -184,20 +249,26 @@ final class ProjectsModel: ObservableObject {
         scheduleSave()
     }
 
+    /// The persisted frame from the last session, applied by
+    /// AppDelegate when the window is first shown on restore. nil for
+    /// fresh windows.
+    var persistedWindowFrame: WindowFrame? { windowFrame }
+
     // MARK: - Persistence helpers
 
-    /// Build a snapshot AppState for persistence. Called on every mutation.
-    private func snapshot() -> AppState {
-        AppState(
-            schemaVersion: AppState.currentSchemaVersion,
+    /// Build a snapshot of this window's current state.
+    private func snapshot() -> WindowSnapshot {
+        WindowSnapshot(
+            id: windowId,
             projects: projects,
-            lastActiveProjectId: selectedProjectId,
+            activeProjectId: selectedProjectId,
             sidebarCollapsed: sidebarCollapsed,
-            uiTypeSizeIndex: uiTypeSizeIndex
+            uiTypeSizeIndex: uiTypeSizeIndex,
+            windowFrame: windowFrame
         )
     }
 
     private func scheduleSave() {
-        persistence.scheduleSave(snapshot())
+        persistence?.updateWindow(snapshot())
     }
 }
