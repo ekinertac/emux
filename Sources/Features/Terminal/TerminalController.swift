@@ -246,7 +246,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         withBaseConfig baseConfig: Ghostty.SurfaceConfiguration? = nil,
         withParent explicitParent: NSWindow? = nil
     ) -> TerminalController {
-        let c = TerminalController.init(ghostty, withBaseConfig: baseConfig, projectsModel: .ephemeral())
+        let c = TerminalController.init(ghostty, withBaseConfig: baseConfig, projectsModel: .detached())
 
         // Get our parent. Our parent is the one explicitly given to us,
         // otherwise the focused terminal, otherwise an arbitrary one.
@@ -335,7 +335,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         position: NSPoint? = nil,
         confirmUndo: Bool = true,
     ) -> TerminalController {
-        let c = TerminalController.init(ghostty, withSurfaceTree: tree, projectsModel: .ephemeral())
+        let c = TerminalController.init(ghostty, withSurfaceTree: tree, projectsModel: .detached())
 
         // Calculate the target frame based on the tree's view bounds
         let treeSize: CGSize? = tree.root?.viewBounds()
@@ -414,7 +414,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
 
         // Create a new window and add it to the parent
-        let controller = TerminalController.init(ghostty, withBaseConfig: baseConfig, projectsModel: .ephemeral())
+        let controller = TerminalController.init(ghostty, withBaseConfig: baseConfig, projectsModel: .detached())
         guard let window = controller.window else { return controller }
 
         // If the parent is miniaturized, then macOS exhibits really strange behaviors
@@ -968,7 +968,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     }
 
     convenience init(_ ghostty: Ghostty.App, with undoState: UndoState) {
-        self.init(ghostty, withSurfaceTree: undoState.surfaceTree, projectsModel: .ephemeral())
+        self.init(ghostty, withSurfaceTree: undoState.surfaceTree, projectsModel: .detached())
 
         // Show the window and restore its frame
         showWindow(nil)

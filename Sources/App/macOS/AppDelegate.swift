@@ -357,6 +357,22 @@ class AppDelegate: NSObject,
             NSApp.terminate(nil)
             return
         }
+
+        // Phase G Task 5b: open the long-lived control-socket
+        // connection now, so ProjectsModel instances built during the
+        // initial window restore below can talk to the daemon.
+        do {
+            let socketPath = NSHomeDirectory() + "/Library/Application Support/emux/emux.sock"
+            _ = try DaemonConnection.bootstrap(socketPath: socketPath)
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "Failed to connect to emux daemon"
+            alert.informativeText = "\(error)\n\nCheck ~/Library/Logs/emux/emuxd.log."
+            alert.addButton(withTitle: "Quit")
+            alert.runModal()
+            NSApp.terminate(nil)
+            return
+        }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -494,29 +510,64 @@ class AppDelegate: NSObject,
             }
         }
 
-        // emux: restore every window that was open at last quit. Each
-        // one owns its own persisted ProjectsModel keyed by a windowId
-        // in state.json. If nothing is persisted (fresh install or
-        // user closed all windows before quit), open one empty window
-        // so the app isn't invisible.
-        let snapshots = StatePersistence.shared.load()
+        // emux Phase G Task 5b: restore windows via the daemon. The
+        // daemon owns state.json now; we ask for the persisted window
+        // list and open a controller per snapshot. Fresh install
+        // (no windows) → create one empty window via workspace.create.
+        guard let daemon = DaemonConnection.shared else {
+            NSLog("[AppDelegate] DaemonConnection.shared is nil — cannot restore")
+            return
+        }
+
+        let snapshots: [WindowSnapshot]
+        do {
+            let result = try daemon.request(method: "workspace.list", params: [:])
+            let windowsRaw = result["windows"] as? [[String: Any]] ?? []
+            let data = try JSONSerialization.data(withJSONObject: windowsRaw)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            snapshots = try decoder.decode([WindowSnapshot].self, from: data)
+        } catch {
+            NSLog("[AppDelegate] workspace.list failed: \(error) — starting empty")
+            spawnFreshWindow(daemon: daemon)
+            return
+        }
+
         if snapshots.isEmpty {
-            let controller = TerminalController(
-                ghostty,
-                projectsModel: ProjectsModel(persistence: .shared, snapshot: nil)
-            )
-            controller.window?.makeKeyAndOrderFront(nil)
+            spawnFreshWindow(daemon: daemon)
         } else {
             for snapshot in snapshots {
-                restoreWindow(from: snapshot)
+                restoreWindow(from: snapshot, daemon: daemon)
             }
         }
     }
 
-    /// Recreate a window from a persisted snapshot on launch.
+    /// Ask the daemon to create a new empty window snapshot, then open
+    /// a controller for it.
     @MainActor
-    private func restoreWindow(from snapshot: WindowSnapshot) {
-        let model = ProjectsModel(persistence: .shared, snapshot: snapshot)
+    private func spawnFreshWindow(daemon: DaemonConnection) {
+        do {
+            let result = try daemon.request(method: "workspace.create", params: [:])
+            guard let snapObj = result["snapshot"] as? [String: Any] else {
+                NSLog("[AppDelegate] workspace.create returned no snapshot")
+                return
+            }
+            let data = try JSONSerialization.data(withJSONObject: snapObj)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let snapshot = try decoder.decode(WindowSnapshot.self, from: data)
+            let model = ProjectsModel(daemon: daemon, snapshot: snapshot)
+            let controller = TerminalController(ghostty, projectsModel: model)
+            controller.window?.makeKeyAndOrderFront(nil)
+        } catch {
+            NSLog("[AppDelegate] spawnFreshWindow failed: \(error)")
+        }
+    }
+
+    /// Recreate a window from a daemon-provided snapshot on launch.
+    @MainActor
+    private func restoreWindow(from snapshot: WindowSnapshot, daemon: DaemonConnection) {
+        let model = ProjectsModel(daemon: daemon, snapshot: snapshot)
         let controller = TerminalController(ghostty, projectsModel: model)
         if let activeId = snapshot.activeProjectId,
            let project = snapshot.projects.first(where: { $0.id == activeId }) {
@@ -1117,15 +1168,15 @@ class AppDelegate: NSObject,
 
     @IBAction func newWindow(_ sender: Any?) {
         // emux: ⌘N opens a new project window with an EMPTY sidebar —
-        // its own independent PERSISTED ProjectsModel with a fresh
-        // windowId. Adds to this window's sidebar don't show up in any
-        // other window, and this window is restored on next launch (as
-        // long as it's still open at quit time).
-        let controller = TerminalController(
-            ghostty,
-            projectsModel: ProjectsModel(persistence: .shared, snapshot: nil)
-        )
-        controller.window?.makeKeyAndOrderFront(nil)
+        // its own daemon-persisted windowId. Add-project mutations
+        // in this window's sidebar don't show up in any other window.
+        // This window is restored on next launch as long as it's
+        // still open at quit time.
+        guard let daemon = DaemonConnection.shared else {
+            NSLog("[newWindow] no daemon connection")
+            return
+        }
+        spawnFreshWindow(daemon: daemon)
     }
 
     @IBAction func newTab(_ sender: Any?) {

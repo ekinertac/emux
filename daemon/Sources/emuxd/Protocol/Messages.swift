@@ -177,6 +177,26 @@ struct AnyCodable: Codable {
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.singleValueContainer()
+        // NSNumber-produced-by-JSONSerialization needs careful handling:
+        // NSNumber(int: 0) also satisfies `as? Bool` (returns false), so a
+        // naive `case let b as Bool` first-cast would misencode every
+        // numeric zero as `false` (and every `1` as `true`). Distinguish
+        // real CFBoolean instances via CFGetTypeID before falling through
+        // to the numeric cases.
+        if let n = value as? NSNumber {
+            if CFGetTypeID(n) == CFBooleanGetTypeID() {
+                try container.encode(n.boolValue)
+                return
+            }
+            let typeStr = String(cString: n.objCType)
+            switch typeStr {
+            case "f", "d":  // Float, Double
+                try container.encode(n.doubleValue)
+            default:  // Int-family (c, i, s, l, q, C, I, S, L, Q)
+                try container.encode(n.int64Value)
+            }
+            return
+        }
         switch value {
         case is NSNull:
             try container.encodeNil()
