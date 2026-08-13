@@ -28,8 +28,35 @@ do {
     exit(1)
 }
 
+// Load persisted workspace state from state.json.
+WorkspaceStore.shared.loadFromDisk()
+
 // Start the control server on emux.sock.
 let controlServer = ControlServer(socketPath: SocketPaths.controlSocket.path)
+
+// Wire WorkspaceStore change callbacks to broadcast workspace.updated
+// events on the control socket. Every attached client sees these.
+// MVP scope note: refinement (only clients with attached panes in the
+// changed window) lands after Task 7's client.attach flow.
+WorkspaceStore.shared.onWindowChanged = { snapshot in
+    do {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let snapData = try encoder.encode(snapshot)
+        let snapObj = try JSONSerialization.jsonObject(with: snapData, options: [.fragmentsAllowed])
+        let payload: [String: Any] = [
+            "window_id": snapshot.id.uuidString,
+            "snapshot": snapObj
+        ]
+        controlServer.broadcast(ControlEvent(name: "workspace.updated", payload: AnyCodable(payload)))
+    } catch {
+        Log.error("workspace", "failed to encode workspace.updated payload: \(error)")
+    }
+}
+WorkspaceStore.shared.onWindowDeleted = { windowId in
+    let payload: [String: Any] = ["window_id": windowId.uuidString]
+    controlServer.broadcast(ControlEvent(name: "workspace.deleted", payload: AnyCodable(payload)))
+}
 controlServer.onShutdownRequested = {
     Log.info("emuxd", "shutdown requested via daemon.stop")
     controlServer.stop()

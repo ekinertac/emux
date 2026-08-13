@@ -66,6 +66,25 @@ final class ControlServer {
         return clients.count
     }
 
+    // MARK: - Event broadcast
+
+    /// Push a control event to every attached client. Used by
+    /// WorkspaceStore hooks for workspace.updated / (later)
+    /// pane.exit / daemon.shutting_down.
+    ///
+    /// MVP scope note (protocol.md §8.1 refinement): we currently
+    /// broadcast to ALL clients. Once client.attach lands (Task 7),
+    /// workspace.updated should only fan out to clients that hold an
+    /// active attach on a pane in the changed window.
+    func broadcast(_ event: ControlEvent) {
+        clientLock.lock()
+        let snapshot = Array(clients.values)
+        clientLock.unlock()
+        for client in snapshot {
+            client.sendEvent(event)
+        }
+    }
+
     // MARK: - Internals
 
     private var actualListener: UnixSocketServer?
@@ -197,7 +216,9 @@ final class ClientConnection {
 
         // Send our hello.
         let reply = DaemonHello()
+        writeLock.lock()
         try writeMessage(reply)
+        writeLock.unlock()
     }
 
     /// Decode + dispatch one request line.
@@ -220,9 +241,13 @@ final class ClientConnection {
         let result = MethodDispatcher.dispatch(request)
         switch result {
         case .response(let resp):
+            writeLock.lock()
             try? writeMessage(resp)
+            writeLock.unlock()
         case .responseAndExit(let resp):
+            writeLock.lock()
             try? writeMessage(resp)
+            writeLock.unlock()
             // Fire the shutdown request on a background queue so we
             // don't deadlock — main.swift's shutdown may join threads.
             DispatchQueue.global().async {
@@ -231,7 +256,23 @@ final class ClientConnection {
         }
     }
 
+    /// Send a server-initiated event on this connection. Silent-fail on
+    /// write error — the accept-loop / read-loop will pick up the dead
+    /// connection separately. Serialized via writeLock so events don't
+    /// interleave with responses on the same fd.
+    func sendEvent(_ event: ControlEvent) {
+        writeLock.lock()
+        defer { writeLock.unlock() }
+        do {
+            try writeMessage(event)
+        } catch {
+            Log.debug("client", "fd=\(fd) event send failed: \(error)")
+        }
+    }
+
     // MARK: - Writes
+
+    private let writeLock = NSLock()
 
     /// Encode a Codable message as JSON + newline and write to the fd.
     private func writeMessage<T: Encodable>(_ msg: T) throws {
@@ -243,7 +284,9 @@ final class ClientConnection {
     private func writeError(id: String?, code: String, message: String) {
         let resolvedId = id ?? "-"
         let resp = ControlResponse(id: resolvedId, error: ControlError(code: code, message: message))
+        writeLock.lock()
         try? writeMessage(resp)
+        writeLock.unlock()
     }
 
     private func writeControlError(_ err: ControlError) {
