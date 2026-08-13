@@ -264,4 +264,79 @@ final class WorkspaceStore {
         lock.lock(); defer { lock.unlock() }
         return windowsById.count
     }
+
+    var paneCount: Int {
+        panesLock.lock(); defer { panesLock.unlock() }
+        return panesById.count
+    }
+
+    // MARK: - Live panes (Task 6c)
+    //
+    // Runtime PTY state, separate from persisted WindowSnapshot data.
+    // Panes are created via pane.spawn and destroyed via pane.close
+    // (or the shell exiting, which fires close_surface_cb — Task 6c
+    // followup wires that to fire pane.exit + remove from this map).
+    //
+    // Separate lock from the workspaces-snapshot lock: shell exit
+    // events fire on libghostty's callback thread and shouldn't have
+    // to wait behind a snapshot mutation, and vice versa.
+
+    private let panesLock = NSLock()
+    private var panesById: [UUID: PTYRuntime] = [:]
+
+    /// Spawn a new PTY runtime bound to a window+tab. Returns the
+    /// paneId; the underlying ghostty_surface_t is alive until
+    /// closePane() runs or the shell exits. Must be called on the
+    /// main thread — PTYRuntime.spawn has a runtime precondition
+    /// checking this (libghostty surface init requires main).
+    func spawnPane(windowId: UUID, tabId: UUID, cwd: URL) throws -> UUID {
+        let paneId = UUID()
+        let pty = PTYRuntime(paneId: paneId, windowId: windowId, tabId: tabId)
+        try pty.spawn(cwd: cwd)
+        panesLock.lock()
+        panesById[paneId] = pty
+        panesLock.unlock()
+        return paneId
+    }
+
+    /// Send input bytes to a pane. Returns false if the pane doesn't
+    /// exist (already closed, wrong id, etc).
+    @discardableResult
+    func writePane(_ paneId: UUID, bytes: Data) -> Bool {
+        panesLock.lock()
+        let pty = panesById[paneId]
+        panesLock.unlock()
+        guard let pty else { return false }
+        pty.sendInput(bytes)
+        return true
+    }
+
+    /// Read the current viewport of a pane as text. Empty string if
+    /// pane not found.
+    func readPane(_ paneId: UUID) -> String {
+        panesLock.lock()
+        let pty = panesById[paneId]
+        panesLock.unlock()
+        return pty?.readScreen() ?? ""
+    }
+
+    /// Close a pane's PTY. Returns true if it existed.
+    @discardableResult
+    func closePane(_ paneId: UUID) -> Bool {
+        panesLock.lock()
+        let pty = panesById.removeValue(forKey: paneId)
+        panesLock.unlock()
+        guard let pty else { return false }
+        pty.close()
+        return true
+    }
+
+    /// Get a pane's metadata for pane.spawn responses.
+    func paneInfo(_ paneId: UUID) -> (windowId: UUID, tabId: UUID, cols: UInt16, rows: UInt16)? {
+        panesLock.lock()
+        let pty = panesById[paneId]
+        panesLock.unlock()
+        guard let pty else { return nil }
+        return (pty.windowId, pty.tabId, pty.cols, pty.rows)
+    }
 }

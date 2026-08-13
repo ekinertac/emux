@@ -39,6 +39,21 @@ enum MethodDispatcher {
         case "workspace.mutate":
             return .response(handleWorkspaceMutate(request))
 
+        // Task 6c pane.* handlers are implemented below but NOT wired
+        // to the dispatch table yet. libghostty's threading model
+        // needs another look:
+        //   • Calling ghostty_surface_new from the client dispatch
+        //     queue (off-main) crashes libghostty during setup.
+        //   • Hopping to main via DispatchQueue.main.sync from the
+        //     client thread deadlocks — main is being drained by
+        //     dispatchMain() and something in the surface init flow
+        //     re-enters the client queue or takes a lock main also
+        //     wants.
+        // Fix requires: dedicated ghostty operations serial queue,
+        // OR async response pattern (semaphore-signaled from a
+        // main-queue block), OR restructuring how the daemon owns
+        // main. Punting until next session.
+
         default:
             let err = ControlError(
                 code: ErrorCode.unknownMethod,
@@ -56,7 +71,7 @@ enum MethodDispatcher {
             "version": ProtocolVersion.daemonVersion,
             "protocol_version": ProtocolVersion.current,
             "uptime_seconds": uptime,
-            "pane_count": 0,  // Task 6+ will fill this in from PTYRuntime
+            "pane_count": WorkspaceStore.shared.paneCount,
             "window_count": WorkspaceStore.shared.windowCount,
             "attached_clients": ControlServer.shared?.attachedClientCount ?? 0
         ]
@@ -150,6 +165,114 @@ enum MethodDispatcher {
                 id: request.id,
                 error: ControlError(code: code, message: "\(e)")
             )
+        } catch {
+            return badParams(request.id, error: error)
+        }
+    }
+
+    // MARK: - pane.* (Task 6c)
+
+    /// pane.spawn — create a real PTY in the daemon. Client passes
+    /// window_id + tab_id + cwd; returns pane_id + initial size.
+    /// Runs on the client dispatch queue — libghostty surface init
+    /// doesn't strictly require main; the earlier main-queue dispatch
+    /// deadlocked because the client thread was serial + main was
+    /// being drained by dispatchMain. Off-main is fine.
+    private static func handlePaneSpawn(_ request: ControlRequest) -> ControlResponse {
+        struct Params: Codable {
+            let window_id: UUID
+            let tab_id: UUID
+            let cwd: URL
+        }
+        do {
+            let p = try request.params.decodeAs(Params.self)
+            let paneId: UUID
+            do {
+                paneId = try WorkspaceStore.shared.spawnPane(
+                    windowId: p.window_id, tabId: p.tab_id, cwd: p.cwd)
+            } catch {
+                return ControlResponse(
+                    id: request.id,
+                    error: ControlError(code: ErrorCode.internalError,
+                                        message: "spawn failed: \(error)"))
+            }
+            guard let info = WorkspaceStore.shared.paneInfo(paneId) else {
+                return ControlResponse(
+                    id: request.id,
+                    error: ControlError(code: ErrorCode.internalError,
+                                        message: "pane created but info lookup failed"))
+            }
+            let result: [String: Any] = [
+                "pane": [
+                    "pane_id": paneId.uuidString,
+                    "window_id": info.windowId.uuidString,
+                    "tab_id": info.tabId.uuidString,
+                    "cwd": p.cwd.path,
+                    "cols": Int(info.cols),
+                    "rows": Int(info.rows),
+                    "exited": false
+                ]
+            ]
+            return ControlResponse(id: request.id, result: AnyCodable(result))
+        } catch {
+            return badParams(request.id, error: error)
+        }
+    }
+
+    /// pane.close — terminate the pane's PTY.
+    private static func handlePaneClose(_ request: ControlRequest) -> ControlResponse {
+        struct Params: Codable { let pane_id: UUID }
+        do {
+            let p = try request.params.decodeAs(Params.self)
+            let closed = WorkspaceStore.shared.closePane(p.pane_id)
+            if !closed {
+                return ControlResponse(
+                    id: request.id,
+                    error: ControlError(code: ErrorCode.notFound,
+                                        message: "no pane with id \(p.pane_id)"))
+            }
+            return ControlResponse(id: request.id, result: AnyCodable(["closed": true]))
+        } catch {
+            return badParams(request.id, error: error)
+        }
+    }
+
+    /// pane.write — send input bytes (base64) to a pane's PTY.
+    private static func handlePaneWrite(_ request: ControlRequest) -> ControlResponse {
+        struct Params: Codable {
+            let pane_id: UUID
+            let bytes: String  // base64
+        }
+        do {
+            let p = try request.params.decodeAs(Params.self)
+            guard let data = Data(base64Encoded: p.bytes) else {
+                return ControlResponse(
+                    id: request.id,
+                    error: ControlError(code: ErrorCode.invalidParams,
+                                        message: "bytes must be base64"))
+            }
+            let written = WorkspaceStore.shared.writePane(p.pane_id, bytes: data)
+            if !written {
+                return ControlResponse(
+                    id: request.id,
+                    error: ControlError(code: ErrorCode.notFound,
+                                        message: "no pane with id \(p.pane_id)"))
+            }
+            return ControlResponse(id: request.id, result: AnyCodable(["written": data.count]))
+        } catch {
+            return badParams(request.id, error: error)
+        }
+    }
+
+    /// pane.read — dump the pane's current viewport as text. Debug
+    /// helper for now; production reads should go through the binary
+    /// transport socket (Task 7). Useful for smoke tests via nc.
+    private static func handlePaneRead(_ request: ControlRequest) -> ControlResponse {
+        struct Params: Codable { let pane_id: UUID }
+        do {
+            let p = try request.params.decodeAs(Params.self)
+            let text = WorkspaceStore.shared.readPane(p.pane_id)
+            return ControlResponse(id: request.id, result: AnyCodable(["text": text]))
         } catch {
             return badParams(request.id, error: error)
         }
