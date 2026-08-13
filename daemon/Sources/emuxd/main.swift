@@ -14,6 +14,7 @@
 
 import Foundation
 import Darwin
+import AppKit
 import GhosttyKit
 
 // Capture start time so daemon.status can report uptime.
@@ -22,13 +23,26 @@ DaemonStartTime.startedAt = ProcessInfo.processInfo.systemUptime
 Log.info("emuxd", "starting (version=\(ProtocolVersion.daemonVersion) proto=\(ProtocolVersion.current) pid=\(ProcessInfo.processInfo.processIdentifier))")
 
 // Initialize libghostty global state. Required before ghostty_app_new
-// or any surface work. Task 6 wiring — surfaces get spawned in later
-// sub-tasks (PTYRuntime).
+// or any surface work.
 if ghostty_init(UInt(CommandLine.argc), CommandLine.unsafeArgv) != GHOSTTY_SUCCESS {
     Log.error("emuxd", "ghostty_init failed — cannot own PTYs")
     exit(1)
 }
 Log.info("emuxd", "libghostty initialized")
+
+// Hidden NSApplication.shared before Ghostty.App init. Task 0 spike
+// verified this works: .accessory means no dock icon, no menu bar,
+// but NSApp is a real object so libghostty's NSApp.isActive read at
+// init doesn't crash. Ghostty also registers didBecomeActive/
+// didResignActive observers — they never fire without a real event
+// loop, which is fine.
+let app = NSApplication.shared
+app.setActivationPolicy(.accessory)
+Log.info("emuxd", "NSApp activation policy = accessory")
+
+// Bring up ghostty_app_t. Callbacks are wired to GhosttyRuntime's
+// static trampolines. Surface creation lands in Task 6c.
+GhosttyRuntime.shared.bootstrap()
 
 // Make sure ~/Library/Application Support/emux exists before binding.
 do {

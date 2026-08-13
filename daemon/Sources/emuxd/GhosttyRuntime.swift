@@ -1,0 +1,131 @@
+// GhosttyRuntime — minimal Swift wrapper around ghostty_app_t.
+//
+// The app-side Sources/Ghostty/Ghostty.App.swift wraps ghostty_app for
+// GUI use — it hooks NSApplication notifications, routes actions to an
+// AppDelegate, drives the AppKit runloop. For the daemon we skip all
+// of that: no menu bar, no dock icon, no AppKit actions to route.
+// Just enough to own PTYs.
+//
+// Callback plumbing follows the C-API pattern: pass `self` as
+// `userdata` via Unmanaged, cast back inside each C callback. Callbacks
+// run on the same thread that calls ghostty_app_tick.
+//
+// Runloop: libghostty's wakeup_cb tells us "please call ghostty_app_tick
+// soon." We hop to the main-queue and tick. main.swift's dispatchMain()
+// keeps the main queue alive so this works.
+//
+// Task 0 spike verified: with `NSApplication.shared.setActivationPolicy(
+// .accessory)` set BEFORE any libghostty call, Ghostty.App init works
+// without a real GUI runloop. Daemon main.swift does that setup before
+// GhosttyRuntime.shared is touched.
+
+import Foundation
+import AppKit
+import GhosttyKit
+
+final class GhosttyRuntime {
+    static let shared = GhosttyRuntime()
+
+    private(set) var app: ghostty_app_t?  // typedef'd to void* in the C header
+    private var config: ghostty_config_t?
+
+    /// Set once at boot from main.swift. Idempotent no-op if already
+    /// initialized. Fails hard (exit 1) on any libghostty error — the
+    /// daemon can't do its job without libghostty.
+    func bootstrap() {
+        guard app == nil else {
+            Log.warn("ghostty", "bootstrap called twice — ignoring")
+            return
+        }
+
+        // Load default config from ~/.config/ghostty/config plus any
+        // XDG paths libghostty knows about.
+        let cfg = ghostty_config_new()
+        ghostty_config_load_default_files(cfg)
+        ghostty_config_finalize(cfg)
+        self.config = cfg
+
+        // Build the runtime config with our callback trampolines.
+        // Store self via passUnretained — the runtime lives for the
+        // process lifetime, so there's nothing to release.
+        let userdata = Unmanaged.passUnretained(self).toOpaque()
+        var runtimeCfg = ghostty_runtime_config_s(
+            userdata: userdata,
+            supports_selection_clipboard: false,  // no X11-style clipboard
+            wakeup_cb: { userdata in
+                GhosttyRuntime.wakeup(userdata)
+            },
+            action_cb: { app, target, action in
+                return GhosttyRuntime.action(app!, target: target, action: action)
+            },
+            read_clipboard_cb: { _, _, _ in
+                // No-op: daemon has no clipboard. Clients handle
+                // clipboard themselves via the input channel. Return
+                // false to tell libghostty we didn't handle it.
+                return false
+            },
+            confirm_read_clipboard_cb: { _, _, _, _ in
+                // No-op.
+            },
+            write_clipboard_cb: { _, _, _, _, _ in
+                // No-op: no daemon-side clipboard write.
+            },
+            close_surface_cb: { userdata, processAlive in
+                GhosttyRuntime.closeSurface(userdata, processAlive: processAlive)
+            }
+        )
+
+        guard let a = ghostty_app_new(&runtimeCfg, cfg) else {
+            Log.error("ghostty", "ghostty_app_new failed")
+            exit(1)
+        }
+        self.app = a
+        Log.info("ghostty", "ghostty_app initialized")
+    }
+
+    /// Explicit tick — call after wakeup_cb fires, or periodically for
+    /// safety. Hops to main-queue if not already there.
+    func tick() {
+        guard let a = app else { return }
+        if Thread.isMainThread {
+            ghostty_app_tick(a)
+        } else {
+            DispatchQueue.main.async {
+                ghostty_app_tick(a)
+            }
+        }
+    }
+
+    // MARK: - C-callback trampolines
+
+    /// Called by libghostty when it wants us to tick. Runs on
+    /// libghostty's internal thread — hop to main.
+    private static func wakeup(_ userdata: UnsafeMutableRawPointer?) {
+        guard let userdata else { return }
+        let runtime = Unmanaged<GhosttyRuntime>.fromOpaque(userdata).takeUnretainedValue()
+        runtime.tick()
+    }
+
+    /// Called for every ghostty action (new_window, close, prompt,
+    /// notification, etc). The daemon is not a GUI app, so most
+    /// actions are no-ops for us. Return true = handled; false =
+    /// libghostty falls back.
+    private static func action(_ app: ghostty_app_t,
+                                target: ghostty_target_s,
+                                action: ghostty_action_s) -> Bool {
+        // Log at debug level so we can see what libghostty is asking
+        // for as we start plumbing panes in. Most of these will get
+        // routed to PTYRuntime (Task 6c) once panes exist.
+        Log.debug("ghostty.action", "tag=\(action.tag)")
+        return false
+    }
+
+    /// Called when a surface's underlying process exits. Task 6c wires
+    /// this to WorkspaceStore + broadcast pane.exit event.
+    private static func closeSurface(_ userdata: UnsafeMutableRawPointer?, processAlive: Bool) {
+        Log.info("ghostty.close_surface", "processAlive=\(processAlive)")
+        // TODO Task 6c: look up which PaneRuntime owns this surface,
+        // notify WorkspaceStore, emit pane.exit event over control
+        // socket to all subscribed clients.
+    }
+}
