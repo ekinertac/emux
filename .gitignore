@@ -36,3 +36,7 @@ STATUS.html
 
 # Code coverage output from xcodebuild — regenerated on every build.
 default.profraw
+
+# SwiftPM build artifacts for daemon/ package.
+daemon/.build/
+daemon/.swiftpm/
