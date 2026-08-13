@@ -30,6 +30,7 @@ Package.resolved
 Frameworks/GhosttyKit.xcframework/
 
 # mkdown artifacts (auto-managed)
+docs/superpowers/plans/2026-08-13-phase-g-daemon-split.html
 STATUS.html
 
 # Code coverage output from xcodebuild — regenerated on every build.

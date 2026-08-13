@@ -133,65 +133,112 @@ Not-yet-scheduled polish threads noted this session:
 
 ---
 
-## Backlog — herdr-inspired (parked, not scheduled)
+## Herdr-parity roadmap (PROMOTED 2026-08-13 to primary track)
 
-Approved 2026-08-12 as future direction after reading `herdrdev/herdr`
-(the runtime coding agents live on). None of this is the next phase; it
-sits behind Phase 4-9 unless explicitly promoted. Re-clone the reference
-impl with `git clone --depth 1 https://github.com/herdrdev/herdr
-/tmp/herdr-src` when picking this up — `src/integration/` is the piece to
-copy from.
+Reordered and elevated after a full architecture read of `herdrdev/herdr`
+(see the research subagent report — kept in session, not persisted). Old
+Phases 4-9 (file tree, editor, scrollback replay, quick-open, hint
+overlay, polish) are **deferred behind this track** — user does not need
+them right now; the vacation-workflow story (remote attach a daemon
+running on the Mac Mini from a laptop) is the goal.
 
-1. **Server model (`emuxd` daemon).** Split emux into a background daemon
-   that owns PTYs, workspaces, tab/pane state, and on-disk snapshots, and
-   a UI client that attaches over a local socket. Terminals survive app
-   quit / logout / machine restart. This is the wezterm-mux equivalent —
-   the single largest gap vs. wezterm today. Everything else in this list
-   depends on it.
+Constraint: **Claude-only** for the agent hook installer. Multi-agent
+socket API (agent-to-agent primitives) is **skipped** — Claude Code has
+native subagents, so the socket only needs one method
+(`pane.report_agent_session`).
 
-2. **Agent state per pane — #1 priority.** Every pane carries a state:
-   `blocked / working / done / idle / unknown`. State cascades pane → tab
-   → project sidebar (badge/dot), so the user never has to hunt for the
-   stuck agent. Detection is a mix of foreground-process sniffing,
-   screen-buffer heuristics, and optional agent-shim hints (see #4).
-   Shim reports session id; server infers state.
+Execution order: **G → A → B → C → D → E → H → I → J → F**
 
-3. **Socket API — agent-to-agent primitives.** Local `AF_UNIX` API the
-   CLI and running agents both talk to. Minimum surface: `pane.list`,
-   `pane.spawn`, `pane.send_input`, `pane.report_agent_session`,
-   `pane.wait_state {pane_id, state, timeout}` (long-poll). Enables one
-   Claude Code session in a pane to wait until another pane is `blocked`
-   before jumping in.
+### Track 1 — Daemon story (matches wezterm mux workflow)
 
-4. **Agent hook installer.** `emux integration install claude` drops a
-   shim at `~/.claude/hooks/herdr-agent-state.sh`-equivalent and edits
-   `~/.claude/settings.json` to register hooks. Follow herdr's
-   post-v7 model: **thin shim** (only reports session_id + transcript
-   path on SessionStart), **server owns state classification** (from
-   process + screen). Reference: `/tmp/herdr-src/src/integration/mod.rs`
-   (per-agent version + event tables), `assets/claude/*.sh` (shim
-   source), `claude_settings.rs` (safe settings.json merge),
-   `targets.rs` (per-agent install/uninstall). Ship Claude Code, Codex,
-   Cursor first.
+- **Phase G — `emuxd` daemon split.** Split emux app into a headless
+  mux daemon (owns PTYs, screen state, workspaces, persistence) and a
+  UI client that attaches over a local socket. Sessions survive
+  closing the GUI window. Reference: `herdr/src/server/headless.rs`,
+  `src/server/autodetect.rs`, `src/persist/`. Biggest single change on
+  this roadmap.
 
-5. **Instance switcher in the titlebar.** Dropdown placed next to the
-   traffic-light buttons (leading-side titlebar accessory). Items = local
-   + remote emux instances (one `emuxd` per host). Selecting an item swaps
-   the whole GUI to that instance's workspaces. Companion button: open a
-   new window against the selected instance. Remote instances reached via
-   an SSH-tunneled version of the same client-server socket protocol.
-   **Not** the same as herdr's `--remote host` (CLI-invoked thin client) —
-   this is an in-app instance picker that changes what the UI is looking
-   at without relaunching.
+- **Phase H — Local reattach polish.** Multi-window reattach: closing
+  the emux window auto-detaches (does NOT kill sessions). Reopening
+  emux reattaches to the same daemon and restores the visible state.
+  Reference: herdr's client attach flow.
 
-Order of implementation, if we come back to this after Phases 4-7 or 9:
+- **Phase I — Remote attach.** `emux connect mini` opens a client
+  window whose sessions live on the daemon running on the Mac Mini.
+  SSH transport (uses `~/.ssh/config` — Tailscale hostnames like
+  `mini-m4` work directly). Both ends must be macOS emux; no
+  cross-platform binary bootstrap needed. Reference:
+  `herdr/src/remote/attach.rs`.
 
-- **1 first** (server split) — everything else depends on the daemon.
-- **2 next** — agent state is the visible payoff that justifies #1.
-- **3 + 4 together** — socket API and shims are the same feature from
-  two sides.
-- **5 last** — instance switcher is pure UI on top of an already-working
-  client-server protocol.
+- **Phase J — Instance switcher UI.** Dropdown in the titlebar next to
+  the traffic-light buttons. Items = local + remote emux instances.
+  Select → GUI swaps to that instance's workspaces. Companion button:
+  "New window in this instance." This is a pure UI layer on top of I.
+
+### Track 2 — Agent state story (screen-detected, no socket needed)
+
+- **Phase A — State hierarchy split.** Refactor emux's `Pane` to be
+  the tab-tree identity only; peer `TerminalState` holds cwd, title,
+  agent metadata, and the future agent-state fields. Enables state to
+  survive pane moves and makes testing easier. Reference:
+  `herdr/src/pane/state.rs:6-13`, `herdr/src/terminal/state.rs:120-150`.
+
+- **Phase B — Agent state model.** Add `AgentState { Idle, Working,
+  Blocked, Unknown }` + `seen: Bool` to `TerminalState`. Wire
+  `@Published` propagation to sidebar/tab badges (visual only, no
+  detector yet). Reference: `herdr/src/detect/mod.rs:9-20`,
+  `herdr/src/pane/state.rs:8-10`. **"Done" = `Idle && !seen`** — not a
+  fifth state.
+
+- **Phase C — Screen manifest engine + Claude manifest.** Port
+  herdr's TOML rule engine (regions: `osc_title`, `osc_progress`,
+  `bottom_non_empty_lines(N)`, `after_last_horizontal_rule`,
+  `whole_recent`, `prompt_box_body`; priority + skip_state_update
+  semantics). Copy `src/detect/manifests/claude.toml` verbatim as the
+  starting rules. Feed from libghostty's screen buffer. This ALONE
+  gives working Claude state detection with no shim.
+
+- **Phase D — Source arbitration + timing debounce.**
+  `recomputeEffectiveState` with priority: (1) visible-blocker
+  overrides, (2) hook if authoritative, (3) screen fallback. Copy
+  herdr's timing constants: 500/300/50 ms polling, 100 ms × 3
+  confirmations + 700 ms cap for working→idle debounce, 800 ms
+  visible-blocker refresh, 3 s startup grace. Reference:
+  `herdr/src/terminal/state.rs:2120-2161`,
+  `herdr/src/pane/agent_detection.rs`.
+
+- **Phase E — Aggregation cascade.** Workspace-level badge is a
+  priority-min over pane states (Blocked > Working > Done > Idle >
+  Unknown). Sidebar rows and tab strip show the worst-in-subtree
+  state. This is the "never hunt for the stuck agent" UX win.
+  Reference: `herdr/src/workspace/aggregate.rs`.
+
+### Late track — Session-identity for future resume
+
+- **Phase F — Claude integration installer + shim + minimal socket.**
+  `emux integration install claude` writes a shim to
+  `~/.claude/hooks/emux-agent-state.sh` and edits
+  `~/.claude/settings.json` (JSONC-preserving parser required — don't
+  destroy user comments). Env vars: `EMUX_ENV=1`,
+  `EMUX_SOCKET_PATH`, `EMUX_PANE_ID`, `EMUX_TAB_ID`,
+  `EMUX_WORKSPACE_ID`. Socket handles ONE method:
+  `pane.report_agent_session` — records Claude session_id +
+  transcript_path so future features (`claude --resume`) work after
+  daemon restart. **NOT required for state detection** (C handles
+  that from screen alone). Reference:
+  `herdr/src/integration/claude_settings.rs`,
+  `herdr/src/integration/assets/claude/herdr-agent-state.sh`.
+
+### Deferred (behind this track, may or may not ever ship)
+
+- Phase 4 — File tree column (was next per spec; parked)
+- Phase 5 — Editor column
+- Phase 6 — Scrollback tee + replay (partially subsumed by Phase G —
+  daemon-owned PTY means PTY bytes are naturally available server-side
+  for tee)
+- Phase 7 — ⌘⇧P quick-open palette
+- Phase 8 — Modifier-key shortcut hint overlay
+- Phase 9 — Polish (keyboard-first audit, scheme rename, etc.)
 
 ---
 
