@@ -42,6 +42,14 @@ final class DaemonConnection {
 
     private let writeLock = NSLock()
 
+    /// Persistent read buffer for the reader thread. Holds any bytes
+    /// that arrived past the newline of the last returned line, so the
+    /// next readLine call finds them instead of blocking on a fresh
+    /// Darwin.read (which would drop those bytes on the floor). Also
+    /// used during the hello handshake so leftover bytes carry into
+    /// the reader loop.
+    private var readerBuffer = Data()
+
     private init(socketPath: String) throws {
         guard let sock = Self.connectUnixSocket(path: socketPath) else {
             throw ConnectionError.connectFailed(path: socketPath)
@@ -61,7 +69,7 @@ final class DaemonConnection {
         // timeout via setsockopt.
         var tv = timeval(tv_sec: 5, tv_usec: 0)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-        guard let helloData = try Self.readLine(fd: fd),
+        guard let helloData = try readLineBuffered(),
               let helloObj = try JSONSerialization.jsonObject(with: helloData) as? [String: Any] else {
             close(fd)
             throw ConnectionError.handshakeFailed(reason: "no daemon hello")
@@ -150,7 +158,7 @@ final class DaemonConnection {
         while true {
             let line: Data?
             do {
-                line = try Self.readLine(fd: fd)
+                line = try readLineBuffered()
             } catch {
                 NSLog("[DaemonConnection] read error: \(error) — connection lost")
                 failAllPending(with: ConnectionError.disconnected)
@@ -172,6 +180,45 @@ final class DaemonConnection {
                 handleEvent(obj)
             default:
                 NSLog("[DaemonConnection] unexpected kind: \(obj["kind"] ?? "?")")
+            }
+        }
+    }
+
+    /// Read one newline-terminated line from `fd`, using
+    /// `readerBuffer` as a persistent scratch across calls. This is
+    /// critical: without persistent buffering, any bytes past the
+    /// first newline in a single read chunk would be dropped, and
+    /// pipelined daemon messages (or a hello + response arriving
+    /// coalesced in one write) would deadlock the reader.
+    private func readLineBuffered() throws -> Data? {
+        // Fast path: does the buffer already contain a newline from a
+        // previous read?
+        if let nl = readerBuffer.firstIndex(of: 0x0A) {
+            let line = readerBuffer.subdata(in: readerBuffer.startIndex..<nl)
+            let after = readerBuffer.index(after: nl)
+            readerBuffer = readerBuffer.subdata(in: after..<readerBuffer.endIndex)
+            return line
+        }
+        // Otherwise keep reading chunks and appending until we find one.
+        var chunk = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let n = chunk.withUnsafeMutableBufferPointer { bp -> Int in
+                Darwin.read(fd, bp.baseAddress, bp.count)
+            }
+            if n < 0 {
+                if errno == EINTR { continue }
+                throw ConnectionError.readFailed(errno: errno)
+            }
+            if n == 0 { return nil }
+            readerBuffer.append(contentsOf: chunk.prefix(n))
+            if let nl = readerBuffer.firstIndex(of: 0x0A) {
+                let line = readerBuffer.subdata(in: readerBuffer.startIndex..<nl)
+                let after = readerBuffer.index(after: nl)
+                readerBuffer = readerBuffer.subdata(in: after..<readerBuffer.endIndex)
+                return line
+            }
+            if readerBuffer.count > 4 * 1024 * 1024 {
+                throw ConnectionError.messageTooLarge
             }
         }
     }
@@ -266,28 +313,10 @@ final class DaemonConnection {
         }
     }
 
-    static func readLine(fd: Int32) throws -> Data? {
-        var buffer = Data()
-        var chunk = [UInt8](repeating: 0, count: 4096)
-        while true {
-            let n = chunk.withUnsafeMutableBufferPointer { bp -> Int in
-                Darwin.read(fd, bp.baseAddress, bp.count)
-            }
-            if n < 0 {
-                if errno == EINTR { continue }
-                throw ConnectionError.readFailed(errno: errno)
-            }
-            if n == 0 { return nil }
-            for i in 0..<n {
-                let byte = chunk[i]
-                if byte == 0x0A { return buffer }
-                buffer.append(byte)
-                if buffer.count > 4 * 1024 * 1024 {
-                    throw ConnectionError.messageTooLarge
-                }
-            }
-        }
-    }
+    // (The old stateless readLine helper was removed after the hang
+    // it caused — it dropped bytes past the first newline in a
+    // single read chunk, losing pipelined messages. Use
+    // readLineBuffered() which persists a buffer across calls.)
 }
 
 // MARK: - Errors
