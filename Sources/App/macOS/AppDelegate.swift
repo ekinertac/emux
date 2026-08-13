@@ -347,6 +347,16 @@ class AppDelegate: NSObject,
             // Manual autofill via the `Edit => AutoFill` menu item still work as expected.
             "NSAutoFillHeuristicControllerEnabled": false,
         ])
+
+        // emux Phase G Task 4: ensure emuxd is running + compatible
+        // BEFORE any window opens. This blocks briefly while we ping
+        // (or spawn + poll for readiness). On mismatch/spawn failure
+        // an NSAlert offers Quit; if we don't get a healthy daemon we
+        // terminate — the app has nothing to render without one.
+        if !DaemonLauncher.ensureRunning() {
+            NSApp.terminate(nil)
+            return
+        }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
