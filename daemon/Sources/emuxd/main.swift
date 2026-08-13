@@ -14,11 +14,21 @@
 
 import Foundation
 import Darwin
+import GhosttyKit
 
 // Capture start time so daemon.status can report uptime.
 DaemonStartTime.startedAt = ProcessInfo.processInfo.systemUptime
 
 Log.info("emuxd", "starting (version=\(ProtocolVersion.daemonVersion) proto=\(ProtocolVersion.current) pid=\(ProcessInfo.processInfo.processIdentifier))")
+
+// Initialize libghostty global state. Required before ghostty_app_new
+// or any surface work. Task 6 wiring — surfaces get spawned in later
+// sub-tasks (PTYRuntime).
+if ghostty_init(UInt(CommandLine.argc), CommandLine.unsafeArgv) != GHOSTTY_SUCCESS {
+    Log.error("emuxd", "ghostty_init failed — cannot own PTYs")
+    exit(1)
+}
+Log.info("emuxd", "libghostty initialized")
 
 // Make sure ~/Library/Application Support/emux exists before binding.
 do {
