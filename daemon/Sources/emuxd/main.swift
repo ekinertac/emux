@@ -41,7 +41,12 @@ app.setActivationPolicy(.accessory)
 Log.info("emuxd", "NSApp activation policy = accessory")
 
 // Bring up ghostty_app_t. Callbacks are wired to GhosttyRuntime's
-// static trampolines. Surface creation lands in Task 6c.
+// static trampolines. PTYRuntime wraps per-pane ghostty_surface_t;
+// Task 6c spike (option A) validated the pattern: a hidden NSView
+// with wantsLayer=true, passed to ghostty_surface_new, gives us a
+// working headless surface — PTY spawn OK, ghostty_surface_text OK
+// for input, ghostty_surface_read_text OK for screen dump. No Metal
+// crashes despite no window attachment.
 GhosttyRuntime.shared.bootstrap()
 
 // Make sure ~/Library/Application Support/emux exists before binding.
