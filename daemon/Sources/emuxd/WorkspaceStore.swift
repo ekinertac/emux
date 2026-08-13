@@ -95,18 +95,32 @@ final class WorkspaceStore {
     /// Apply a mutation. Returns the resulting WindowSnapshot on
     /// success. Throws on missing window/project/tab. Fires
     /// onWindowChanged before returning.
+    ///
+    /// Deadlock trap history: applyMutation can throw
+    /// (projectNotFound, tabNotFound, invalidReorder). The original
+    /// version unlocked manually after applyMutation, which meant a
+    /// throw exited without unlocking, leaked the lock, and hung the
+    /// whole daemon on the next request. Now we use defer so the
+    /// unlock runs on every exit path. The onWindowChanged callback
+    /// and schedulePersist call must NOT be inside the locked
+    /// region (broadcast → sendEvent → write can block on a slow
+    /// client, and we don't want to hold the store lock while
+    /// waiting on socket buffers), so we capture the snapshot before
+    /// unlocking and fire the callbacks after.
     func apply(_ mutation: WorkspaceMutation, toWindow windowId: UUID) throws -> WindowSnapshot {
-        lock.lock()
-        guard var snap = windowsById[windowId] else {
-            lock.unlock()
-            throw MutationError.windowNotFound(windowId)
-        }
-        try Self.applyMutation(mutation, to: &snap)
-        windowsById[windowId] = snap
-        lock.unlock()
-        onWindowChanged?(snap)
+        let updatedSnapshot: WindowSnapshot = try {
+            lock.lock()
+            defer { lock.unlock() }
+            guard var snap = windowsById[windowId] else {
+                throw MutationError.windowNotFound(windowId)
+            }
+            try Self.applyMutation(mutation, to: &snap)
+            windowsById[windowId] = snap
+            return snap
+        }()
+        onWindowChanged?(updatedSnapshot)
         schedulePersist()
-        return snap
+        return updatedSnapshot
     }
 
     /// Pure function that mutates a snapshot in place. Split from
