@@ -101,47 +101,34 @@ enum DaemonLauncher {
             ]
             try writeLine(fd: fd, jsonObject: hello)
 
-            // Read daemon hello.
+            // Read daemon hello. Protocol version + daemon version come
+            // from this single reply — we intentionally do NOT chain a
+            // daemon.status call here because two back-to-back reads
+            // over a kernel-coalesced write can lose the second reply
+            // (same shape as the DaemonConnection.readLine bug fixed
+            // in 89b9f1a). pingDaemon only needs enough info to decide
+            // "alive and compatible?"; one round-trip is enough.
             guard let helloReply = try readLine(fd: fd, timeout: 5.0),
                   let dict = helloReply.parseAsJSONObject() else {
                 return nil
             }
             // If the daemon returned an error (protocol_incompatible),
-            // parse it and short-circuit.
+            // parse it and short-circuit — treat as incompatible so the
+            // caller shows the "stop the old daemon" alert.
             if dict["kind"] as? String == "response",
                let errObj = dict["error"] as? [String: Any],
                (errObj["code"] as? String) == "protocol_incompatible" {
                 NSLog("[DaemonLauncher] daemon rejected our hello: \(errObj["message"] ?? "?")")
-                // Return a synthetic status with the daemon's advertised
-                // version if we can find it (we can't from an error);
-                // caller treats this as incompatible.
                 return DaemonStatus(version: "unknown", protocolVersion: -1, daemonPid: 0, uptimeSeconds: 0)
             }
             guard let daemonProto = dict["protocol_version"] as? Int else {
                 return nil
             }
-            _ = daemonProto  // recorded below via status call
-
-            // Send daemon.status request.
-            let statusReq: [String: Any] = [
-                "kind": "request",
-                "id": "launcher-status",
-                "method": "daemon.status",
-                "params": [:],
-            ]
-            try writeLine(fd: fd, jsonObject: statusReq)
-
-            // Read status response.
-            guard let statusLine = try readLine(fd: fd, timeout: 5.0),
-                  let statusDict = statusLine.parseAsJSONObject(),
-                  let result = statusDict["result"] as? [String: Any] else {
-                return nil
-            }
             return DaemonStatus(
-                version: (result["version"] as? String) ?? "?",
-                protocolVersion: (result["protocol_version"] as? Int) ?? -1,
-                daemonPid: (result["attached_clients"] as? Int) ?? 0,  // pid isn't in status; use 0
-                uptimeSeconds: (result["uptime_seconds"] as? Int) ?? 0
+                version: (dict["daemon_version"] as? String) ?? "?",
+                protocolVersion: daemonProto,
+                daemonPid: (dict["daemon_pid"] as? Int) ?? 0,
+                uptimeSeconds: 0
             )
         } catch {
             NSLog("[DaemonLauncher] ping failed: \(error)")
