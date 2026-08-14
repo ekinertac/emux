@@ -47,6 +47,8 @@ enum MethodDispatcher {
             return .response(handlePaneWrite(request))
         case "pane.read":
             return .response(handlePaneRead(request))
+        case "client.attach":
+            return .response(handleClientAttach(request))
 
         default:
             let err = ControlError(
@@ -276,6 +278,38 @@ enum MethodDispatcher {
             let p = try request.params.decodeAs(Params.self)
             let text = mainSync { WorkspaceStore.shared.readPane(p.pane_id) }
             return ControlResponse(id: request.id, result: AnyCodable(["text": text]))
+        } catch {
+            return badParams(request.id, error: error)
+        }
+    }
+
+    // MARK: - client.attach (Task 7a)
+
+    /// client.attach — reserve a transport-socket stream_id for this
+    /// pane. Client must then connect to emux-client.sock within 5s
+    /// and complete the transport hello with this stream_id.
+    private static func handleClientAttach(_ request: ControlRequest) -> ControlResponse {
+        struct Params: Codable { let pane_id: UUID }
+        do {
+            let p = try request.params.decodeAs(Params.self)
+            // Verify the pane exists first — otherwise we'd reserve
+            // a stream_id for a nonexistent pane.
+            guard WorkspaceStore.shared.paneInfo(p.pane_id) != nil else {
+                return ControlResponse(
+                    id: request.id,
+                    error: ControlError(code: ErrorCode.notFound,
+                                        message: "no pane with id \(p.pane_id)"))
+            }
+            guard let transport = ClientTransport.shared else {
+                return ControlResponse(
+                    id: request.id,
+                    error: ControlError(code: ErrorCode.internalError,
+                                        message: "transport server not running"))
+            }
+            let streamId = transport.reserveAttach(paneId: p.pane_id)
+            return ControlResponse(id: request.id, result: AnyCodable([
+                "stream_id": streamId.uuidString
+            ]))
         } catch {
             return badParams(request.id, error: error)
         }

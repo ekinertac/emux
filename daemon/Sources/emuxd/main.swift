@@ -99,6 +99,17 @@ do {
     exit(1)
 }
 
+// Start the transport server on emux-client.sock — binary channel
+// for screen frames. Task 7a delivers the initial SCREEN_RESET on
+// attach; live SCREEN_UPDATE + input frames land in Task 7b+.
+let transportServer = ClientTransport(socketPath: SocketPaths.clientTransportSocket.path)
+do {
+    try transportServer.start()
+} catch {
+    Log.error("emuxd", "transport server failed to start: \(error)")
+    exit(1)
+}
+
 // Trap SIGINT/SIGTERM so Ctrl-C during dev doesn't leave a stale
 // socket file behind. Use DispatchSourceSignal because raw
 // signal(SIGINT, ...) doesn't play well with Swift runtime.
