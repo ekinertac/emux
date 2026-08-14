@@ -39,20 +39,14 @@ enum MethodDispatcher {
         case "workspace.mutate":
             return .response(handleWorkspaceMutate(request))
 
-        // Task 6c pane.* handlers are implemented below but NOT wired
-        // to the dispatch table yet. libghostty's threading model
-        // needs another look:
-        //   • Calling ghostty_surface_new from the client dispatch
-        //     queue (off-main) crashes libghostty during setup.
-        //   • Hopping to main via DispatchQueue.main.sync from the
-        //     client thread deadlocks — main is being drained by
-        //     dispatchMain() and something in the surface init flow
-        //     re-enters the client queue or takes a lock main also
-        //     wants.
-        // Fix requires: dedicated ghostty operations serial queue,
-        // OR async response pattern (semaphore-signaled from a
-        // main-queue block), OR restructuring how the daemon owns
-        // main. Punting until next session.
+        case "pane.spawn":
+            return .response(handlePaneSpawn(request))
+        case "pane.close":
+            return .response(handlePaneClose(request))
+        case "pane.write":
+            return .response(handlePaneWrite(request))
+        case "pane.read":
+            return .response(handlePaneRead(request))
 
         default:
             let err = ControlError(
@@ -174,10 +168,10 @@ enum MethodDispatcher {
 
     /// pane.spawn — create a real PTY in the daemon. Client passes
     /// window_id + tab_id + cwd; returns pane_id + initial size.
-    /// Runs on the client dispatch queue — libghostty surface init
-    /// doesn't strictly require main; the earlier main-queue dispatch
-    /// deadlocked because the client thread was serial + main was
-    /// being drained by dispatchMain. Off-main is fine.
+    /// All libghostty operations MUST run on main (libghostty crashes
+    /// on other threads). Hop to main via .sync; the
+    /// GhosttyRuntime.tick fix (always-async) prevents the reentrancy
+    /// deadlock we hit earlier.
     private static func handlePaneSpawn(_ request: ControlRequest) -> ControlResponse {
         struct Params: Codable {
             let window_id: UUID
@@ -186,15 +180,23 @@ enum MethodDispatcher {
         }
         do {
             let p = try request.params.decodeAs(Params.self)
+            let spawnResult = mainSync { () -> Result<UUID, Error> in
+                do {
+                    let id = try WorkspaceStore.shared.spawnPane(
+                        windowId: p.window_id, tabId: p.tab_id, cwd: p.cwd)
+                    return .success(id)
+                } catch {
+                    return .failure(error)
+                }
+            }
             let paneId: UUID
-            do {
-                paneId = try WorkspaceStore.shared.spawnPane(
-                    windowId: p.window_id, tabId: p.tab_id, cwd: p.cwd)
-            } catch {
+            switch spawnResult {
+            case .success(let id): paneId = id
+            case .failure(let e):
                 return ControlResponse(
                     id: request.id,
                     error: ControlError(code: ErrorCode.internalError,
-                                        message: "spawn failed: \(error)"))
+                                        message: "spawn failed: \(e)"))
             }
             guard let info = WorkspaceStore.shared.paneInfo(paneId) else {
                 return ControlResponse(
@@ -219,12 +221,13 @@ enum MethodDispatcher {
         }
     }
 
-    /// pane.close — terminate the pane's PTY.
+    /// pane.close — terminate the pane's PTY. Runs on main because
+    /// ghostty_surface_free is a libghostty call.
     private static func handlePaneClose(_ request: ControlRequest) -> ControlResponse {
         struct Params: Codable { let pane_id: UUID }
         do {
             let p = try request.params.decodeAs(Params.self)
-            let closed = WorkspaceStore.shared.closePane(p.pane_id)
+            let closed = mainSync { WorkspaceStore.shared.closePane(p.pane_id) }
             if !closed {
                 return ControlResponse(
                     id: request.id,
@@ -237,7 +240,7 @@ enum MethodDispatcher {
         }
     }
 
-    /// pane.write — send input bytes (base64) to a pane's PTY.
+    /// pane.write — send input bytes (base64) to a pane's PTY. On main.
     private static func handlePaneWrite(_ request: ControlRequest) -> ControlResponse {
         struct Params: Codable {
             let pane_id: UUID
@@ -251,7 +254,7 @@ enum MethodDispatcher {
                     error: ControlError(code: ErrorCode.invalidParams,
                                         message: "bytes must be base64"))
             }
-            let written = WorkspaceStore.shared.writePane(p.pane_id, bytes: data)
+            let written = mainSync { WorkspaceStore.shared.writePane(p.pane_id, bytes: data) }
             if !written {
                 return ControlResponse(
                     id: request.id,
@@ -266,16 +269,26 @@ enum MethodDispatcher {
 
     /// pane.read — dump the pane's current viewport as text. Debug
     /// helper for now; production reads should go through the binary
-    /// transport socket (Task 7). Useful for smoke tests via nc.
+    /// transport socket (Task 7). On main.
     private static func handlePaneRead(_ request: ControlRequest) -> ControlResponse {
         struct Params: Codable { let pane_id: UUID }
         do {
             let p = try request.params.decodeAs(Params.self)
-            let text = WorkspaceStore.shared.readPane(p.pane_id)
+            let text = mainSync { WorkspaceStore.shared.readPane(p.pane_id) }
             return ControlResponse(id: request.id, result: AnyCodable(["text": text]))
         } catch {
             return badParams(request.id, error: error)
         }
+    }
+
+    /// Run a block on the dedicated libghostty serial queue,
+    /// blocking the caller until it completes. All libghostty
+    /// operations funnel through here. This queue is where periodic
+    /// ghostty_app_tick fires too — mutual serialization prevents
+    /// reentrancy AND lets free/spawn/read/write coexist with ticks
+    /// without deadlock.
+    private static func mainSync<T>(_ block: () -> T) -> T {
+        return GhosttyRuntime.shared.queue.sync(execute: block)
     }
 
     // MARK: - Encoding helpers

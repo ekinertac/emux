@@ -29,10 +29,23 @@ final class GhosttyRuntime {
     private(set) var app: ghostty_app_t?  // typedef'd to void* in the C header
     private var config: ghostty_config_t?
 
+    /// libghostty is pinned to main. Both spawn/free/write/read AND
+    /// the periodic tick run on main. Tried a dedicated non-main
+    /// serial queue — libghostty crashed off-thread. All handler
+    /// code hops to main via DispatchQueue.main.sync.
+    var queue: DispatchQueue { .main }
+
     /// Set once at boot from main.swift. Idempotent no-op if already
     /// initialized. Fails hard (exit 1) on any libghostty error — the
-    /// daemon can't do its job without libghostty.
+    /// daemon can't do its job without libghostty. Runs on main
+    /// (caller invokes from main.swift's top level pre-dispatchMain).
+    /// libghostty pins itself to whatever thread ghostty_app_new
+    /// runs on; we honor that by always using main.
     func bootstrap() {
+        _bootstrap()
+    }
+
+    private func _bootstrap() {
         guard app == nil else {
             Log.warn("ghostty", "bootstrap called twice — ignoring")
             return
@@ -52,8 +65,11 @@ final class GhosttyRuntime {
         var runtimeCfg = ghostty_runtime_config_s(
             userdata: userdata,
             supports_selection_clipboard: false,  // no X11-style clipboard
-            wakeup_cb: { userdata in
-                GhosttyRuntime.wakeup(userdata)
+            wakeup_cb: { _ in
+                // No-op: libghostty asks us to tick, but we ignore.
+                // The periodic main-queue timer above ticks at ~60Hz
+                // regardless. This avoids a hang where wakeup_cb
+                // fired mid-operation and re-entered libghostty.
             },
             action_cb: { app, target, action in
                 return GhosttyRuntime.action(app!, target: target, action: action)
@@ -81,19 +97,37 @@ final class GhosttyRuntime {
         }
         self.app = a
         Log.info("ghostty", "ghostty_app initialized")
+
+        // Drive ticks periodically on the ghostty queue. Ticks are
+        // serialized with all other libghostty operations (spawn,
+        // free, write, read). Between operations, the queue drains
+        // pending ticks; during an operation, ticks wait — same as
+        // any other serial-queue block. This resolves the earlier
+        // "surface_free waits for tick, tick blocked behind free"
+        // circular dependency: they're on the SAME queue now, and
+        // free happens between two ticks, not concurrently with one.
+        // 16ms cadence = ~60Hz screen refresh.
+        scheduleNextTick()
     }
 
-    /// Explicit tick — call after wakeup_cb fires, or periodically for
-    /// safety. Hops to main-queue if not already there.
+    private func scheduleNextTick() {
+        queue.asyncAfter(deadline: .now() + 0.016) { [weak self] in
+            self?.tickAndReschedule()
+        }
+    }
+
+    private func tickAndReschedule() {
+        if let a = app { ghostty_app_tick(a) }
+        scheduleNextTick()
+    }
+
+    /// Explicit tick — retained for external callers, but production
+    /// path is the periodic scheduleNextTick chain above. Async on
+    /// the ghostty queue so it queues behind whatever's currently
+    /// running.
     func tick() {
         guard let a = app else { return }
-        if Thread.isMainThread {
-            ghostty_app_tick(a)
-        } else {
-            DispatchQueue.main.async {
-                ghostty_app_tick(a)
-            }
-        }
+        queue.async { ghostty_app_tick(a) }
     }
 
     // MARK: - C-callback trampolines

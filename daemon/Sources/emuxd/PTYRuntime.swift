@@ -60,9 +60,10 @@ final class PTYRuntime {
     deinit {
         // Belt-and-suspenders: if someone forgot to call close(),
         // libghostty leaks the PTY. Cover it here.
-        if !closed, let surface {
-            ghostty_surface_free(surface)
-        }
+        // Currently disabled — surface_free hangs, see close() note.
+        // if !closed, let surface {
+        //     ghostty_surface_free(surface)
+        // }
     }
 
     /// Create the underlying ghostty_surface_t. Should be called on
@@ -155,12 +156,17 @@ final class PTYRuntime {
 
     /// Free the surface and release the PTY. Safe to call more than
     /// once (subsequent calls are no-ops).
+    ///
+    /// Diagnostic mode: skip ghostty_surface_free — it hangs main
+    /// indefinitely. Leaks the surface but proves the rest of the
+    /// pipeline (spawn/write/read) works. Once we figure out why
+    /// surface_free hangs, restore the call.
     func close() {
-        guard let s = surface, !closed else { return }
-        ghostty_surface_free(s)
+        guard surface != nil, !closed else { return }
+        // ghostty_surface_free(surface!)   // <-- HANGS. Investigate.
         surface = nil
         closed = true
-        Log.info("pty", "closed pane=\(paneId.uuidString.prefix(8))")
+        Log.info("pty", "closed pane=\(paneId.uuidString.prefix(8)) (surface intentionally leaked to avoid free-hang)")
     }
 }
 
