@@ -341,6 +341,18 @@ final class WorkspaceStore {
         return true
     }
 
+    /// Resize a pane's grid. Returns false if pane not found. Must
+    /// be called on main (libghostty requirement).
+    @discardableResult
+    func resizePane(_ paneId: UUID, cols: UInt16, rows: UInt16) -> Bool {
+        panesLock.lock()
+        let pty = panesById[paneId]
+        panesLock.unlock()
+        guard let pty else { return false }
+        pty.resize(cols: cols, rows: rows)
+        return true
+    }
+
     /// Read the current viewport of a pane as text. Empty string if
     /// pane not found.
     func readPane(_ paneId: UUID) -> String {

@@ -26,13 +26,15 @@ import Darwin
 
 /// Frame type bytes per protocol.md §9.1.
 enum TransportFrameType: UInt8 {
+    // Server → client
     case screenUpdate  = 0x01
     case screenReset   = 0x02
     case cursor        = 0x03
     case titleChanged  = 0x04
     case bell          = 0x05
-    // 0x10-0x1F reserved for client→daemon direction (INPUT 0x10,
-    // RESIZE 0x11) — Task 7c/7d.
+    // Client → server
+    case input         = 0x10  // raw bytes → PTY (keystrokes/paste)
+    case resize        = 0x11  // JSON {cols,rows}
 }
 
 final class ClientTransport {
@@ -201,17 +203,69 @@ final class ClientTransport {
         let text = WorkspaceStore.shared.readPane(pending.paneId)
         conn.sendFrame(type: .screenReset, payload: Data(text.utf8))
 
-        // For Task 7a, hold the connection open but don't push more
-        // frames. Client will see the initial screen and nothing
-        // more. Task 7b wires the update loop.
-        // Block until EOF so we don't drop the connection.
-        var scratch = [UInt8](repeating: 0, count: 256)
+        // Read binary frames from the client (INPUT / RESIZE per
+        // protocol.md §9). Frame format:
+        //   [4-byte BE length][1-byte type][payload of len-1 bytes]
+        // Bad frames or EOF end the connection.
+        var readBuf = Data()
+        var scratch = [UInt8](repeating: 0, count: 4096)
         while true {
-            let n = scratch.withUnsafeMutableBufferPointer { bp -> Int in
-                Darwin.read(fd, bp.baseAddress, bp.count)
+            // Ensure we have at least the 5-byte header.
+            while readBuf.count < 5 {
+                let n = scratch.withUnsafeMutableBufferPointer { bp -> Int in
+                    Darwin.read(fd, bp.baseAddress, bp.count)
+                }
+                if n <= 0 { break }
+                readBuf.append(contentsOf: scratch.prefix(n))
             }
-            if n <= 0 { break }
-            // Ignore any bytes for now — no INPUT/RESIZE handling yet.
+            if readBuf.count < 5 { break }  // EOF or error
+            let totalLen = UInt32(readBuf[0]) << 24
+                         | UInt32(readBuf[1]) << 16
+                         | UInt32(readBuf[2]) << 8
+                         | UInt32(readBuf[3])
+            let type = readBuf[4]
+            let payloadLen = Int(totalLen) - 1
+            if payloadLen < 0 || payloadLen > 4 * 1024 * 1024 {
+                Log.warn("transport", "stream=\(streamId.uuidString.prefix(8)) bad frame len \(totalLen), closing")
+                break
+            }
+            // Ensure the full payload is in the buffer.
+            while readBuf.count < 5 + payloadLen {
+                let n = scratch.withUnsafeMutableBufferPointer { bp -> Int in
+                    Darwin.read(fd, bp.baseAddress, bp.count)
+                }
+                if n <= 0 { break }
+                readBuf.append(contentsOf: scratch.prefix(n))
+            }
+            if readBuf.count < 5 + payloadLen { break }
+            let payload = readBuf.subdata(in: 5..<5 + payloadLen)
+            readBuf = readBuf.subdata(in: 5 + payloadLen..<readBuf.count)
+
+            switch type {
+            case TransportFrameType.input.rawValue:
+                // Raw bytes → PTY. Hop to main (libghostty rule).
+                DispatchQueue.main.sync {
+                    _ = WorkspaceStore.shared.writePane(pending.paneId, bytes: payload)
+                }
+            case TransportFrameType.resize.rawValue:
+                // Payload = JSON {cols, rows}.
+                if let obj = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
+                   let cols = obj["cols"] as? Int,
+                   let rows = obj["rows"] as? Int {
+                    DispatchQueue.main.sync {
+                        _ = WorkspaceStore.shared.resizePane(pending.paneId,
+                                                             cols: UInt16(cols),
+                                                             rows: UInt16(rows))
+                    }
+                } else {
+                    Log.warn("transport", "stream=\(streamId.uuidString.prefix(8)) bad RESIZE payload")
+                }
+            default:
+                // Unknown frame type — protocol.md says receivers MUST
+                // skip and continue, not close. Already consumed via
+                // the payload slice above.
+                Log.debug("transport", "stream=\(streamId.uuidString.prefix(8)) unknown frame type 0x\(String(type, radix: 16))")
+            }
         }
         Log.info("transport", "detached stream=\(streamId.uuidString.prefix(8))")
         streamsLock.lock()

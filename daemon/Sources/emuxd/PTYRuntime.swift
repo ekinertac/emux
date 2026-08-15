@@ -142,6 +142,21 @@ final class PTYRuntime {
         }
     }
 
+    /// Resize the pane's grid to the given cell dimensions. Converts
+    /// cols/rows to pixels using a fixed 12x30 cell size (matches our
+    /// default font). Not pixel-perfect against the client's actual
+    /// font, but the parser only cares about cols/rows anyway — the
+    /// pixel numbers are internal.
+    func resize(cols: UInt16, rows: UInt16) {
+        guard let surface, !closed else { return }
+        let cellW: UInt32 = 12
+        let cellH: UInt32 = 30
+        ghostty_surface_set_size(surface, cellW * UInt32(cols), cellH * UInt32(rows))
+        let size = ghostty_surface_size(surface)
+        self.cols = size.columns
+        self.rows = size.rows
+    }
+
     /// Read the entire viewport as UTF-8 text. Used for client-attach
     /// SCREEN_RESET frames and periodic scrollback capture.
     /// Returns empty string if surface is closed or read fails.
