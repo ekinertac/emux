@@ -119,6 +119,10 @@ final class PTYRuntime {
             throw SpawnError.surfaceNewFailed
         }
         self.surface = s
+        // Register the surface pointer so GhosttyRuntime.action can
+        // route surface-scoped actions (RENDER, TITLE_CHANGED, BELL)
+        // back to this pane.
+        WorkspaceStore.shared.registerSurface(s, paneId: paneId)
 
         // Read back the grid size libghostty picked based on our
         // 800x600 view frame + default font.
@@ -173,6 +177,7 @@ final class PTYRuntime {
     /// once (subsequent calls are no-ops).
     func close() {
         guard let s = surface, !closed else { return }
+        WorkspaceStore.shared.deregisterSurface(s)
         ghostty_surface_free(s)
         surface = nil
         closed = true

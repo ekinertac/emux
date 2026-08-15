@@ -43,6 +43,10 @@ final class ClientTransport {
     private let streamsLock = NSLock()
     /// Active transport connections keyed by stream_id.
     private var streams: [UUID: TransportConnection] = [:]
+    /// Reverse index: paneId → set of stream_ids attached. Lets
+    /// pushScreenUpdate(paneId:) fan out to just the relevant
+    /// streams without scanning every open transport connection.
+    private var streamsByPane: [UUID: Set<UUID>] = [:]
     /// Pending attach reservations from client.attach. Client has
     /// 5 seconds to connect + hello with the stream_id, or the
     /// reservation is dropped.
@@ -68,6 +72,53 @@ final class ClientTransport {
         self.actualListener = l
         Self.shared = self
         Log.info("transport", "client transport listening at \(path)")
+
+        // Start the SCREEN_UPDATE poll loop. Every 100ms, for each
+        // pane that has attached streams, capture the current screen
+        // text and — if it differs from the last snapshot — push a
+        // SCREEN_UPDATE frame to every attached stream.
+        //
+        // MVP-simple. Doesn't matter which libghostty action fires;
+        // we just observe the result. Delta encoding + tighter
+        // trigger points are optimizations for later.
+        //
+        // Runs on the ghostty main queue because it calls
+        // readPane → ghostty_surface_read_text which is a libghostty
+        // API and must be on main.
+        pollForUpdates()
+    }
+
+    /// Per-pane last-sent screen snapshot for diff detection. Keyed
+    /// by paneId so multiple panes are polled independently.
+    private var lastSentByPane: [UUID: String] = [:]
+
+    private func pollForUpdates() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            self?.tickPoll()
+        }
+    }
+
+    private func tickPoll() {
+        streamsLock.lock()
+        let paneIds = Array(streamsByPane.keys)
+        streamsLock.unlock()
+
+        for paneId in paneIds {
+            let current = WorkspaceStore.shared.readPane(paneId)
+            let last = lastSentByPane[paneId]
+            if current != last {
+                lastSentByPane[paneId] = current
+                streamsLock.lock()
+                let sids = streamsByPane[paneId] ?? []
+                let conns = sids.compactMap { streams[$0] }
+                streamsLock.unlock()
+                let payload = Data(current.utf8)
+                for conn in conns {
+                    conn.sendFrame(type: .screenUpdate, payload: payload)
+                }
+            }
+        }
+        pollForUpdates()  // reschedule
     }
 
     func stop() {
@@ -139,6 +190,7 @@ final class ClientTransport {
         let conn = TransportConnection(fd: fd, streamId: streamId, paneId: pending.paneId)
         streamsLock.lock()
         streams[streamId] = conn
+        streamsByPane[pending.paneId, default: []].insert(streamId)
         streamsLock.unlock()
 
         // Send initial SCREEN_RESET with the pane's current text.
@@ -164,8 +216,30 @@ final class ClientTransport {
         Log.info("transport", "detached stream=\(streamId.uuidString.prefix(8))")
         streamsLock.lock()
         streams.removeValue(forKey: streamId)
+        streamsByPane[pending.paneId]?.remove(streamId)
+        if streamsByPane[pending.paneId]?.isEmpty == true {
+            streamsByPane.removeValue(forKey: pending.paneId)
+        }
         streamsLock.unlock()
         conn.close()
+    }
+
+    /// Push a SCREEN_UPDATE frame with the pane's current text to
+    /// every attached stream. Called by GhosttyRuntime.action when
+    /// libghostty fires GHOSTTY_ACTION_RENDER for this surface.
+    /// MVP sends the full plain-text screen every time — no diffing.
+    /// Delta encoding + ANSI-fidelity encoding land later.
+    func pushScreenUpdate(paneId: UUID) {
+        streamsLock.lock()
+        let sids = streamsByPane[paneId] ?? []
+        let conns = sids.compactMap { streams[$0] }
+        streamsLock.unlock()
+        guard !conns.isEmpty else { return }
+        let text = WorkspaceStore.shared.readPane(paneId)
+        let payload = Data(text.utf8)
+        for conn in conns {
+            conn.sendFrame(type: .screenUpdate, payload: payload)
+        }
     }
 
     // MARK: - Frame helpers

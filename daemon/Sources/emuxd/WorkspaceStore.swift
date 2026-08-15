@@ -12,6 +12,7 @@
 // workspace.updated event broadcasts.
 
 import Foundation
+import GhosttyKit
 
 final class WorkspaceStore {
     static let shared = WorkspaceStore()
@@ -283,6 +284,35 @@ final class WorkspaceStore {
 
     private let panesLock = NSLock()
     private var panesById: [UUID: PTYRuntime] = [:]
+    /// Reverse index: ghostty_surface_t pointer → paneId. Registered
+    /// at PTYRuntime.spawn, deregistered at PTYRuntime.close. Used by
+    /// GhosttyRuntime.action to route surface-scoped actions (RENDER,
+    /// TITLE_CHANGED, BELL) to the right pane without scanning every
+    /// runtime. Pointer-keyed via `Int(bitPattern:)` because
+    /// UnsafeMutableRawPointer isn't Hashable in Swift.
+    private var paneIdBySurface: [Int: UUID] = [:]
+
+    /// Register a surface → pane binding. Called by PTYRuntime.spawn
+    /// after ghostty_surface_new returns.
+    func registerSurface(_ surface: ghostty_surface_t, paneId: UUID) {
+        panesLock.lock()
+        paneIdBySurface[Int(bitPattern: surface)] = paneId
+        panesLock.unlock()
+    }
+
+    /// Deregister. Called by PTYRuntime.close before ghostty_surface_free.
+    func deregisterSurface(_ surface: ghostty_surface_t) {
+        panesLock.lock()
+        paneIdBySurface.removeValue(forKey: Int(bitPattern: surface))
+        panesLock.unlock()
+    }
+
+    /// Look up paneId by surface pointer. Called from libghostty
+    /// callback threads.
+    func paneId(forSurface surface: ghostty_surface_t) -> UUID? {
+        panesLock.lock(); defer { panesLock.unlock() }
+        return paneIdBySurface[Int(bitPattern: surface)]
+    }
 
     /// Spawn a new PTY runtime bound to a window+tab. Returns the
     /// paneId; the underlying ghostty_surface_t is alive until

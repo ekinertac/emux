@@ -65,11 +65,14 @@ final class GhosttyRuntime {
         var runtimeCfg = ghostty_runtime_config_s(
             userdata: userdata,
             supports_selection_clipboard: false,  // no X11-style clipboard
-            wakeup_cb: { _ in
-                // No-op: libghostty asks us to tick, but we ignore.
-                // The periodic main-queue timer above ticks at ~60Hz
-                // regardless. This avoids a hang where wakeup_cb
-                // fired mid-operation and re-entered libghostty.
+            wakeup_cb: { userdata in
+                // Re-enabled after NSApp.run() fixed the thread model.
+                // Under dispatchMain(), wakeup-triggered tick reentered
+                // libghostty on the wrong thread and hung. NSApp.run()
+                // binds main queue to the real main thread, and our
+                // tick uses queue.async which just schedules — no
+                // in-line reentrancy.
+                GhosttyRuntime.wakeup(userdata)
             },
             action_cb: { app, target, action in
                 return GhosttyRuntime.action(app!, target: target, action: action)
@@ -140,17 +143,22 @@ final class GhosttyRuntime {
         runtime.tick()
     }
 
-    /// Called for every ghostty action (new_window, close, prompt,
-    /// notification, etc). The daemon is not a GUI app, so most
-    /// actions are no-ops for us. Return true = handled; false =
-    /// libghostty falls back.
+    /// Called for every ghostty action (render, new_window, close,
+    /// prompt, notification, etc). The daemon is not a GUI app, so
+    /// most actions are no-ops for us. Return true = handled; false
+    /// = libghostty falls back.
+    ///
+    /// Surface-scoped actions we care about:
+    ///   • GHOSTTY_ACTION_RENDER — screen contents changed. Push a
+    ///     SCREEN_UPDATE frame to attached clients.
+    /// Called for every ghostty action. Diagnostic-only during
+    /// bringup. RENDER never fires for our off-screen surface, so
+    /// SCREEN_UPDATE frames are driven by periodic polling in
+    /// ClientTransport instead. Kept as a hook for future
+    /// action-driven optimization (e.g. TITLE_CHANGED, RING_BELL).
     private static func action(_ app: ghostty_app_t,
                                 target: ghostty_target_s,
                                 action: ghostty_action_s) -> Bool {
-        // Log at debug level so we can see what libghostty is asking
-        // for as we start plumbing panes in. Most of these will get
-        // routed to PTYRuntime (Task 6c) once panes exist.
-        Log.debug("ghostty.action", "tag=\(action.tag)")
         return false
     }
 
