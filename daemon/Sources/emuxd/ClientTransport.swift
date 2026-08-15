@@ -279,20 +279,33 @@ final class ClientTransport {
     }
 
     /// Push a SCREEN_UPDATE frame with the pane's current text to
-    /// every attached stream. Called by GhosttyRuntime.action when
-    /// libghostty fires GHOSTTY_ACTION_RENDER for this surface.
-    /// MVP sends the full plain-text screen every time — no diffing.
-    /// Delta encoding + ANSI-fidelity encoding land later.
+    /// every attached stream. Not called on the current SCREEN_UPDATE
+    /// path (that's poll-based, see tickPoll) but kept as a hook for
+    /// action-driven pushes later.
     func pushScreenUpdate(paneId: UUID) {
+        let text = WorkspaceStore.shared.readPane(paneId)
+        broadcastToPane(paneId, type: .screenUpdate, payload: Data(text.utf8))
+    }
+
+    /// Push TITLE_CHANGED frame — UTF-8 string of the new pane title.
+    func pushTitleChanged(paneId: UUID, title: String) {
+        broadcastToPane(paneId, type: .titleChanged, payload: Data(title.utf8))
+    }
+
+    /// Push BELL frame — empty payload.
+    func pushBell(paneId: UUID) {
+        broadcastToPane(paneId, type: .bell, payload: Data())
+    }
+
+    /// Fan-out helper. Snapshot the current attached streams for this
+    /// pane, send the frame to each. Silent no-op if no streams.
+    private func broadcastToPane(_ paneId: UUID, type: TransportFrameType, payload: Data) {
         streamsLock.lock()
         let sids = streamsByPane[paneId] ?? []
         let conns = sids.compactMap { streams[$0] }
         streamsLock.unlock()
-        guard !conns.isEmpty else { return }
-        let text = WorkspaceStore.shared.readPane(paneId)
-        let payload = Data(text.utf8)
         for conn in conns {
-            conn.sendFrame(type: .screenUpdate, payload: payload)
+            conn.sendFrame(type: type, payload: payload)
         }
     }
 

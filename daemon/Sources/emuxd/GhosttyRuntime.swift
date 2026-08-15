@@ -151,15 +151,29 @@ final class GhosttyRuntime {
     /// Surface-scoped actions we care about:
     ///   • GHOSTTY_ACTION_RENDER — screen contents changed. Push a
     ///     SCREEN_UPDATE frame to attached clients.
-    /// Called for every ghostty action. Diagnostic-only during
-    /// bringup. RENDER never fires for our off-screen surface, so
-    /// SCREEN_UPDATE frames are driven by periodic polling in
-    /// ClientTransport instead. Kept as a hook for future
-    /// action-driven optimization (e.g. TITLE_CHANGED, RING_BELL).
+    /// Called for every ghostty action. We route the surface-scoped
+    /// ones we care about (SET_TITLE, RING_BELL) to per-pane
+    /// TransportFrame emission. RENDER never fires for our off-screen
+    /// surface so SCREEN_UPDATE stays poll-driven (Task 7b).
     private static func action(_ app: ghostty_app_t,
                                 target: ghostty_target_s,
                                 action: ghostty_action_s) -> Bool {
-        return false
+        guard target.tag == GHOSTTY_TARGET_SURFACE,
+              let surface = target.target.surface,
+              let paneId = WorkspaceStore.shared.paneId(forSurface: surface) else {
+            return false
+        }
+        switch action.tag {
+        case GHOSTTY_ACTION_SET_TITLE:
+            let title = String(cString: action.action.set_title.title)
+            ClientTransport.shared?.pushTitleChanged(paneId: paneId, title: title)
+            return true
+        case GHOSTTY_ACTION_RING_BELL:
+            ClientTransport.shared?.pushBell(paneId: paneId)
+            return true
+        default:
+            return false
+        }
     }
 
     /// Called when a surface's underlying process exits. Task 6c wires
