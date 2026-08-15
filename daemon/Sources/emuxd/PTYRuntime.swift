@@ -30,9 +30,16 @@ final class PTYRuntime {
     let windowId: UUID
     let tabId: UUID
 
-    /// The invisible NSView libghostty attaches to. Kept as a strong
-    /// reference so it outlives the surface — libghostty stores the
-    /// underlying pointer and dereferences it during ticks.
+    /// Off-screen NSWindow that hosts our NSView. Kept as a strong
+    /// reference. Task 6f investigation: passing a bare NSView with
+    /// wantsLayer=true (no window) caused non-deterministic Zig
+    /// panics inside ghostty_surface_new. Suspect: libghostty reads
+    /// view.window / view.window.screen and empty defaults trigger a
+    /// slice underflow. Hosting in a real (but off-screen, hidden)
+    /// window gives it valid values to read.
+    private let window: NSWindow
+
+    /// The NSView libghostty attaches to. Lives inside `window`.
     private let view: NSView
 
     /// The ghostty_surface_t. Freed on close().
@@ -50,20 +57,28 @@ final class PTYRuntime {
         self.paneId = paneId
         self.windowId = windowId
         self.tabId = tabId
-        // Frame size drives the initial grid dimensions. libghostty
-        // divides by cell size (~12x30 for default font) to get
-        // cols/rows. We resize precisely on the first client.attach.
+        // Off-screen window so libghostty sees view.window (non-nil)
+        // and view.window.screen (non-nil). Never .orderFront'd, so
+        // it doesn't actually appear anywhere.
+        let frame = NSRect(x: -10000, y: -10000, width: 800, height: 600)
+        self.window = NSWindow(
+            contentRect: frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        self.window.isReleasedWhenClosed = false
         self.view = NSView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
         self.view.wantsLayer = true
+        self.window.contentView = self.view
     }
 
     deinit {
         // Belt-and-suspenders: if someone forgot to call close(),
         // libghostty leaks the PTY. Cover it here.
-        // Currently disabled — surface_free hangs, see close() note.
-        // if !closed, let surface {
-        //     ghostty_surface_free(surface)
-        // }
+        if !closed, let surface {
+            ghostty_surface_free(surface)
+        }
     }
 
     /// Create the underlying ghostty_surface_t. Should be called on
@@ -156,17 +171,12 @@ final class PTYRuntime {
 
     /// Free the surface and release the PTY. Safe to call more than
     /// once (subsequent calls are no-ops).
-    ///
-    /// Diagnostic mode: skip ghostty_surface_free — it hangs main
-    /// indefinitely. Leaks the surface but proves the rest of the
-    /// pipeline (spawn/write/read) works. Once we figure out why
-    /// surface_free hangs, restore the call.
     func close() {
-        guard surface != nil, !closed else { return }
-        // ghostty_surface_free(surface!)   // <-- HANGS. Investigate.
+        guard let s = surface, !closed else { return }
+        ghostty_surface_free(s)
         surface = nil
         closed = true
-        Log.info("pty", "closed pane=\(paneId.uuidString.prefix(8)) (surface intentionally leaked to avoid free-hang)")
+        Log.info("pty", "closed pane=\(paneId.uuidString.prefix(8))")
     }
 }
 

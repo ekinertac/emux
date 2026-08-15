@@ -132,7 +132,13 @@ sigtermSource.setEventHandler {
 }
 sigtermSource.resume()
 
-// Block forever. The control server runs its accept loop on its own
-// thread; per-client dispatch queues handle I/O. main just needs to
-// keep the process alive.
-dispatchMain()
+// Block forever, running the AppKit main-thread runloop.
+//
+// We deliberately do NOT use dispatchMain() here. dispatchMain() runs
+// main-queue blocks on ARBITRARY GCD worker threads — those threads
+// are not NSThread.mainThread. AppKit types (NSWindow init,
+// libghostty's Metal setup, various sanity checks) assert on the
+// real main thread and throw NSInternalInconsistencyException
+// otherwise. NSApp.run() drives the main queue from the ACTUAL
+// main thread, which is what libghostty and NSWindow expect.
+NSApp.run()
