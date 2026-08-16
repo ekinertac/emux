@@ -483,6 +483,7 @@ class AppDelegate: NSObject,
 
         // Setup our menu
         setupMenuImages()
+        installDebugMenu()
 
         // Setup signal handlers
         setupSignals()
@@ -767,6 +768,42 @@ class AppDelegate: NSObject,
     }
 
     /// Setup signal handlers
+    /// Task 8: add a Debug menu with "New Daemon Pane Window…" so
+    /// we can prove the daemon-owned PTY path end-to-end from the
+    /// app UI. Once daemon panes are wired into the regular tab
+    /// flow (Task 10), this menu can move behind a #if DEBUG or be
+    /// removed entirely.
+    private func installDebugMenu() {
+        guard let mainMenu = NSApp.mainMenu else { return }
+        // Avoid duplicating if we're called twice for any reason.
+        if mainMenu.items.contains(where: { $0.title == "Debug" }) { return }
+
+        let debugItem = NSMenuItem(title: "Debug", action: nil, keyEquivalent: "")
+        let debugMenu = NSMenu(title: "Debug")
+
+        let paneItem = NSMenuItem(
+            title: "New Daemon Pane Window…",
+            action: #selector(newDaemonPaneWindow(_:)),
+            keyEquivalent: "d"
+        )
+        paneItem.keyEquivalentModifierMask = [.command, .shift]
+        paneItem.target = self
+        debugMenu.addItem(paneItem)
+
+        debugItem.submenu = debugMenu
+        mainMenu.addItem(debugItem)
+    }
+
+    private var openDaemonPaneWindows: [DaemonPaneWindowController] = []
+
+    @IBAction func newDaemonPaneWindow(_ sender: Any?) {
+        let controller = DaemonPaneWindowController()
+        // Keep a strong reference — otherwise the controller (and
+        // its transport) deinits immediately.
+        openDaemonPaneWindows.append(controller)
+        controller.window?.makeKeyAndOrderFront(nil)
+    }
+
     private func setupSignals() {
         // Register a signal handler for config reloading. It appears that all
         // of this is required. I've commented each line because its a bit unclear.
