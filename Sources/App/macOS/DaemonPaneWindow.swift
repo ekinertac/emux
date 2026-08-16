@@ -157,9 +157,14 @@ final class DaemonPaneWindowController: NSWindowController {
         }
 
         do {
+            // Fresh UUID for the tab binding on each open. Debug
+            // window isn't tied to any real emux tab yet; this just
+            // has to be a syntactically valid UUID for the daemon
+            // to decode.
+            let fakeTabId = UUID().uuidString
             let spawnResult = try daemon.request(method: "pane.spawn", params: [
                 "window_id": windowId,
-                "tab_id": "00000000-0000-0000-0000-daemon-pane1".padding(toLength: 36, withPad: "0", startingAt: 0),
+                "tab_id": fakeTabId,
                 "cwd": "file://" + NSHomeDirectory() + "/"
             ])
             guard let pane = spawnResult["pane"] as? [String: Any],
