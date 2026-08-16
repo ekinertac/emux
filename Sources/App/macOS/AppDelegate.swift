@@ -781,12 +781,16 @@ class AppDelegate: NSObject,
         let debugItem = NSMenuItem(title: "Debug", action: nil, keyEquivalent: "")
         let debugMenu = NSMenu(title: "Debug")
 
+        // No keyboard shortcut — ⌘⇧D collided with Ghostty's default
+        // "split down" (TerminalWindow.performKeyEquivalent consumes
+        // it before the menu routing gets a look-in). Menu-only for
+        // now. If we want a shortcut later, pick something outside
+        // Ghostty's binding set (e.g. ⌘⌥⇧D).
         let paneItem = NSMenuItem(
             title: "New Daemon Pane Window…",
             action: #selector(newDaemonPaneWindow(_:)),
-            keyEquivalent: "d"
+            keyEquivalent: ""
         )
-        paneItem.keyEquivalentModifierMask = [.command, .shift]
         paneItem.target = self
         debugMenu.addItem(paneItem)
 
