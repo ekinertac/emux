@@ -30,6 +30,15 @@ final class DaemonPaneWindowController: NSWindowController {
     private var paneId: UUID?
 
     private var textView: NSTextView!
+    /// Latest screen text without any injected cursor marker. We
+    /// re-render (with-or-without cursor) from this on each blink
+    /// tick, so successive frames don't accumulate cursor glyphs.
+    private var latestScreenText: String = ""
+    /// Toggles every ~500ms — appends a block glyph as the last
+    /// character when true, nothing when false. Fake cursor, but
+    /// it makes the window feel like a terminal.
+    private var cursorVisible: Bool = false
+    private var cursorTimer: Timer?
 
     convenience init() {
         // Plain resizable window with a scrollable text view inside.
@@ -45,12 +54,18 @@ final class DaemonPaneWindowController: NSWindowController {
         let scrollView = NSTextView.scrollableTextView()
         let tv = scrollView.documentView as! NSTextView
         tv.isEditable = false          // input is captured via key events, not typed
+        tv.isSelectable = false        // no selection at all — it's a terminal, not a doc
         tv.isRichText = false
-        tv.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-        tv.textColor = NSColor.textColor
-        tv.backgroundColor = NSColor.black
+        tv.font = NSFont(name: "IosevkaTerm Nerd Font Mono", size: 13)
+            ?? NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        tv.textColor = NSColor(white: 0.87, alpha: 1.0)  // #dedede — softer than pure white
+        tv.backgroundColor = NSColor(white: 0.07, alpha: 1.0)  // #121212 — softer than pure black
+        // Layout: no wrapping, tight leading, edge-to-edge padding.
+        tv.textContainerInset = NSSize(width: 8, height: 6)
         tv.autoresizingMask = [.width, .height]
         scrollView.autoresizingMask = [.width, .height]
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
         window.contentView = scrollView
 
         self.init(window: window)
@@ -58,10 +73,15 @@ final class DaemonPaneWindowController: NSWindowController {
 
         // Intercept keystrokes at the window level so we can forward
         // them to the daemon as INPUT frames instead of NSTextView
-        // consuming them. Simplest hook: override the window's
-        // sendEvent via a NSWindowDelegate. Even simpler: install a
-        // local event monitor scoped to this window.
+        // consuming them.
         installKeyMonitor(window: window)
+
+        // 500ms blink cadence — matches most terminals' default.
+        cursorTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.cursorVisible.toggle()
+            self.renderTextView()
+        }
 
         // Kick off spawn + attach async so init returns quickly.
         DispatchQueue.main.async { [weak self] in
@@ -208,16 +228,34 @@ final class DaemonPaneWindowController: NSWindowController {
     }
 
     private func renderScreen(_ text: String) {
-        // Full replace on every update. Later we can be smarter
-        // (append-only diffs, cursor-position preservation, etc).
+        latestScreenText = text
+        renderTextView()
+    }
+
+    /// Redraw the text view from `latestScreenText`, optionally
+    /// appending a block glyph to represent the (fake) cursor.
+    /// Called on screen updates AND on every cursor-blink tick.
+    private func renderTextView() {
+        // Trim trailing whitespace lines so the cursor lands right
+        // after the last visible character, not at the bottom of an
+        // empty viewport. libghostty's read_text includes trailing
+        // blanks up to the grid size, which for us is 19 rows —
+        // without trimming, the cursor would sit at row 19 forever.
+        var text = latestScreenText
+        while text.hasSuffix("\n") { text.removeLast() }
+
+        if cursorVisible {
+            text.append("▊")
+        }
         textView.string = text
-        // Scroll to bottom so newest output is visible.
         textView.scrollToEndOfDocument(nil)
     }
 
     // MARK: - Cleanup
 
     override func close() {
+        cursorTimer?.invalidate()
+        cursorTimer = nil
         // Send pane.close before tearing down — leaks a daemon-side
         // pane otherwise.
         if let pid = paneId,
